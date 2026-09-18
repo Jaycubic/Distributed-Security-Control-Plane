@@ -1,0 +1,828 @@
+REVIEW FEEDBACK — DISTRIBUTED SECURITY CONTROL PLANE MASTER IMPLEMENTATION PLAN
+
+Use this document to revise the Master Implementation Plan BEFORE implementing Phase 1.
+Do not start coding the full platform yet. Preserve the overall architecture and intent, but correct the following architectural issues.
+
+============================================================
+1. HARD ARCHITECTURAL INVARIANT: SECURITY MUST NOT BE IN THE NORMAL REQUEST PATH
+============================================================
+
+The core idea is OUT-OF-BAND security observation and containment.
+
+Normal traffic MUST remain:
+
+    Client -> Application -> Response
+
+Security telemetry is a parallel path:
+
+    Application
+        |
+        +---- async telemetry ----> Security Control Plane
+
+The Security Control Plane MUST NOT become a synchronous reverse proxy/gateway for ordinary application traffic in the default architecture.
+
+The application must continue operating even if the Security Control Plane is unavailable.
+
+Add an explicit architectural invariant:
+
+"Normal application requests must never wait for security ingestion, correlation, detection, LLM analysis, or the security controller."
+
+============================================================
+2. DO NOT PRESENT HARD LATENCY GUARANTEES AS ARCHITECTURAL FACTS
+============================================================
+
+The plan currently states things such as:
+
+    Non-blocking Async Emitter <100 us
+    App synchronous overhead <150 us
+    Ingestion >50,000 events/sec/core
+    Detection-to-containment <500 ms
+
+These should be treated as BENCHMARK TARGETS, NOT guaranteed design properties.
+
+Actual values depend on:
+- hardware;
+- operating system;
+- language/runtime;
+- network topology;
+- event size;
+- scheduler behavior;
+- load;
+- queue contention;
+- serialization;
+- sensor source.
+
+Define measurable SLO/benchmark targets instead.
+
+For example:
+
+    Application telemetry overhead:
+        p50 < target
+        p95 < target
+        p99 < target
+
+    Detection latency:
+        p50/p95/p99
+
+    Containment latency:
+        p50/p95/p99
+
+The exact numerical targets should be established after baseline benchmarks.
+
+============================================================
+3. ADD AN EXPLICIT EVENT STREAM / MESSAGE-BUS ABSTRACTION
+============================================================
+
+The current plan has:
+
+    Ingest -> Redis
+    Ingest -> PostgreSQL
+    Ingest -> Correlation
+
+This creates too much direct coupling.
+
+Introduce an explicit event-stream abstraction:
+
+    Sensors / Agents
+          |
+          v
+    Ingestion / Normalization
+          |
+          v
+    Event Stream
+          |
+      +---+----------------+------------------+
+      |                    |                  |
+      v                    v                  v
+    Detector          Correlator       Durable Writer
+      |                    |                  |
+      +---------+----------+                  v
+                |                         PostgreSQL
+                v
+             Policy
+                |
+                v
+           Containment
+
+For the initial implementation, Redis Streams is acceptable.
+Do not introduce Kafka/Redpanda/NATS/etc. merely for "enterprise" appearance. Keep the abstraction replaceable.
+
+============================================================
+4. REDIS AND POSTGRESQL MUST HAVE CLEARLY SEPARATED RESPONSIBILITIES
+============================================================
+
+Redis is NOT the durable system of record.
+
+Redis should primarily handle HOT / VOLATILE operational state:
+
+- sliding-window counters;
+- temporary risk state;
+- active session revocation state;
+- short-lived correlation windows;
+- temporary IP reputation;
+- queues/streams;
+- containment broadcasts;
+- TTL-based state;
+- short-lived caches.
+
+PostgreSQL should hold DURABLE / HISTORICAL state:
+
+- security events that require retention;
+- incidents;
+- policies;
+- policy versions;
+- applications;
+- identities;
+- containment commands;
+- containment history;
+- analyst actions;
+- audit records;
+- LLM analyses;
+- evidence references;
+- incident timelines.
+
+Mental model:
+
+    Redis = "What is happening now?"
+    PostgreSQL = "What happened and what did we decide?"
+
+============================================================
+5. DO NOT WRITE EVERY HIGH-VOLUME RAW EVENT DIRECTLY TO POSTGRESQL
+============================================================
+
+The plan currently routes all ingestion toward PostgreSQL.
+
+This can become a serious bottleneck.
+
+At high event volumes, one relational row per raw telemetry event may be impractical.
+
+Introduce a durable-event strategy:
+
+    Event
+      |
+      +--> Hot detection/correlation
+      |
+      +--> Event stream
+               |
+               +--> filtering / aggregation / sampling
+                         |
+                         v
+                     PostgreSQL
+
+Persist:
+- security-significant events;
+- incident-associated events;
+- selected raw events;
+- aggregated/summarized telemetry;
+- evidence required for investigation.
+
+Do NOT assume every kernel or network telemetry event must become an individual PostgreSQL row.
+
+Keep high-volume raw evidence retention configurable.
+
+============================================================
+6. ADD IDENTITY RESOLUTION AS A FIRST-CLASS COMPONENT
+============================================================
+
+The correlation engine currently jumps directly into a cross-application graph.
+
+Before correlation, introduce an explicit Identity Resolution layer.
+
+It should resolve relationships such as:
+
+    Source IP
+       |
+       v
+    Device / fingerprint
+       |
+       v
+    Session
+       |
+       v
+    User / service identity
+       |
+       v
+    Application
+       |
+       v
+    Container
+       |
+       v
+    PID / Process
+
+The correlation engine should operate on a canonical actor/entity model instead of independently interpreting every identity representation.
+
+Identity Resolution should be a first-class Phase 3 component.
+
+============================================================
+7. DO NOT BUILD A GRAPH DATABASE TOO EARLY
+============================================================
+
+The plan calls for an in-memory correlation graph.
+That is acceptable.
+
+Do NOT introduce Neo4j or another graph database in the initial implementation unless real query requirements justify it.
+
+Start with efficient in-memory relationship structures and explicit TTLs.
+
+Only introduce a graph database later if measured workloads demonstrate that it is necessary.
+
+============================================================
+8. CLARIFY THE ROLES OF TETRAGON, FALCO, AND CILIUM/HUBBLE
+============================================================
+
+Do not present these tools as interchangeable sensors.
+
+Treat them as distinct sources:
+
+TETRAGON:
+- process execution;
+- process lifecycle;
+- syscall/kprobe-related security events;
+- network/socket activity;
+- runtime enforcement capabilities.
+
+FALCO:
+- syscall/runtime event collection and rule-based detection;
+- runtime behavioral alerts.
+
+CILIUM / HUBBLE:
+- network flow visibility;
+- service-to-service traffic;
+- L3/L4;
+- DNS;
+- L7 visibility depending on configuration;
+- network policy/identity context.
+
+The unified event model MUST preserve source-specific semantics.
+
+Every normalized event should retain source information such as:
+
+    source.type = tetragon | falco | hubble
+    source.event_type = ...
+
+Do not flatten events so much that important original semantics are lost.
+
+============================================================
+9. LLM MUST REMAIN ADVISORY — NEVER AN AUTHORITY
+============================================================
+
+The existing plan correctly says the LLM cannot directly execute commands.
+Strengthen this boundary.
+
+Required pipeline:
+
+    Incident Context
+          |
+          v
+         LLM
+          |
+          v
+    Structured JSON
+          |
+          v
+    Schema Validation
+          |
+          v
+    Deterministic Policy Validation
+          |
+          v
+    Authorization / Approval
+          |
+          v
+    Signed Containment Command
+          |
+          v
+        Agent
+
+The LLM may:
+- classify;
+- summarize;
+- correlate;
+- explain;
+- recommend actions.
+
+The LLM MUST NOT:
+- directly invoke shell commands;
+- directly call containment APIs;
+- directly block an IP;
+- directly isolate a service;
+- directly revoke sessions.
+
+The deterministic security system remains the root of trust.
+
+============================================================
+10. LLM MODE MUST BE OFF BY DEFAULT
+============================================================
+
+The platform must be completely functional without an LLM.
+
+Mode A:
+
+    Event
+      |
+      v
+    Policy
+      |
+      v
+    Detection
+      |
+      v
+    Response
+
+Mode B:
+
+    Event
+      |
+      v
+    Deterministic Engine
+      |
+      +--> known -> response
+      |
+      +--> ambiguous -> LLM
+                           |
+                           v
+                     structured advice
+                           |
+                           v
+                     deterministic validation
+                           |
+                           v
+                        response
+
+No part of normal application operation should require the LLM.
+
+No request should wait for the LLM.
+
+No emergency response should depend exclusively on an LLM.
+
+============================================================
+11. CONTAINMENT ACTIONS MUST HAVE TTL, AUDITABILITY, AND ROLLBACK
+============================================================
+
+The plan has command TTLs. Extend this to the containment state itself.
+
+Every automated containment action should carry:
+
+- command_id;
+- incident_id;
+- policy_id;
+- target;
+- action;
+- created_at;
+- expires_at;
+- reason;
+- evidence reference;
+- automatic/manual;
+- authorization information;
+- rollback action;
+- policy version.
+
+Prefer temporary containment where appropriate:
+
+    BLOCK IP for 15 minutes
+
+rather than:
+
+    BLOCK IP forever
+
+unless a policy explicitly requires indefinite blocking.
+
+Containment should be reversible and auditable.
+
+============================================================
+12. CHANGE THE GRADUATED RESPONSE MODEL FROM ONLY "LEVELS" TO ACTION CAPABILITIES
+============================================================
+
+The Level 0-6 model is useful, but actions should be modeled explicitly.
+
+Example:
+
+    OBSERVE
+      |
+      v
+    ALERT
+      |
+      v
+    THROTTLE
+      |
+      v
+    REVOKE SESSION
+      |
+      v
+    LOCK IDENTITY
+      |
+      v
+    BLOCK NETWORK
+      |
+      v
+    ISOLATE SERVICE
+
+Every action should reference:
+- evidence;
+- policy;
+- confidence;
+- authorization;
+- TTL;
+- rollback.
+
+Do not automatically escalate every anomaly to a destructive response.
+
+============================================================
+13. REMOVE / DEFER WEAK EARLY DETECTION SIGNALS
+============================================================
+
+The initial rule:
+
+    "Country B within 15 minutes of Country A"
+
+should NOT be an early core rule.
+
+Geographical velocity can generate false positives due to:
+- VPNs;
+- proxies;
+- corporate networks;
+- mobile carrier NAT;
+- travel;
+- shared accounts;
+- cloud access.
+
+Start with more operationally concrete signals:
+
+- burst failed logins;
+- credential stuffing;
+- session misuse;
+- privilege escalation;
+- unusual process execution;
+- sensitive file access;
+- lateral movement;
+- API enumeration;
+- unexpected outbound connections;
+- unusual data export;
+- abnormal service-to-service behavior.
+
+Geographical analysis can be a later optional signal.
+
+============================================================
+14. APPLICATION AGENT SHOULD BE SMALL AND FAST
+============================================================
+
+The agent should not perform expensive analysis.
+
+Its responsibilities:
+
+    collect
+    normalize
+    enqueue
+    transmit asynchronously
+    maintain local emergency policy cache
+    execute authorized containment
+
+Do not put:
+- LLM;
+- complex ML;
+- cross-application correlation;
+- expensive database queries
+
+inside the application hot path.
+
+============================================================
+15. DEFINE FAILURE MODES EXPLICITLY
+============================================================
+
+The architecture needs explicit behavior for:
+
+A. Security controller unavailable
+
+    Application continues.
+    Agent continues buffering telemetry.
+    Cached emergency policies remain available.
+
+B. Redis unavailable
+
+    Detection should degrade gracefully.
+    Durable/event transport should have a defined fallback.
+    Do not silently lose security-critical events.
+
+C. PostgreSQL unavailable
+
+    Application should not normally stop.
+    Telemetry should buffer according to retention/backpressure policy.
+
+D. LLM unavailable
+
+    Mode B falls back to deterministic Mode A.
+    The LLM must never be required for basic protection.
+
+E. Agent disconnected
+
+    Central controller must show agent health.
+    Local agent should continue defined local policy behavior.
+
+Do not make "fail open" vs "fail closed" a single global switch.
+Define it per function/action.
+
+============================================================
+16. SECURITY CONTROL PLANE MUST NOT BECOME A SINGLE POINT OF FAILURE
+============================================================
+
+The system should preserve application availability if:
+- control plane crashes;
+- LLM service crashes;
+- dashboard crashes;
+- PostgreSQL is temporarily unavailable;
+- telemetry pipeline is overloaded.
+
+Use:
+- local buffering;
+- backpressure;
+- retry;
+- bounded queues;
+- cached policies;
+- explicit degraded modes.
+
+The control plane itself needs health monitoring.
+
+============================================================
+17. KERNEL / HOST OBSERVATION AND HTTP AUDITING ARE DIFFERENT TELEMETRY LAYERS
+============================================================
+
+Do not treat them as one undifferentiated "traffic audit."
+
+There should be clear layers:
+
+    Network events
+        |
+        v
+    Runtime/process events
+        |
+        v
+    HTTP/API events
+        |
+        v
+    Authentication/authorization events
+        |
+        v
+    Application/business events
+        |
+        v
+    Database/security-sensitive events
+
+Correlation links them.
+
+This multi-layer model is one of the project's main strengths.
+
+============================================================
+18. ADD KERNEL-TO-APPLICATION CORRELATION AS A FIRST-CLASS PROBLEM
+============================================================
+
+The plan mentions linking container ID/PID/timestamps to HTTP requests.
+This needs more rigor.
+
+Define the correlation strategy explicitly.
+
+Potential correlation keys:
+
+- request_id;
+- trace_id;
+- session_id;
+- container_id;
+- PID;
+- process ancestry;
+- timestamp windows;
+- application identity;
+- namespace;
+- socket/connection metadata.
+
+Do not rely on timestamp matching alone when stronger identifiers are available.
+
+============================================================
+19. START WITH VERTICAL SLICES, NOT ALL SEVEN PHASES AT ONCE
+============================================================
+
+Do NOT immediately implement:
+
+Rust + React + Redis + PostgreSQL + Tetragon + Falco + Hubble + Prometheus + Grafana + Python + LLM
+
+all at once.
+
+The first working slice should be:
+
+    Mock Application
+        |
+        +--> Async Security Event
+                  |
+                  v
+             Rust Ingestion
+                  |
+                  v
+             Redis Stream
+                  |
+                  v
+             Deterministic Detector
+                  |
+                  v
+               Incident
+                  |
+                  v
+              Dashboard
+
+Then benchmark application overhead.
+
+After this is stable, add:
+- identity resolution;
+- correlation;
+- containment;
+- kernel sensors;
+- LLM.
+
+============================================================
+20. PROPOSED REVISED PHASE STRUCTURE
+============================================================
+
+Phase 1
+    Event schema
+    Agent/SDK
+    Async ingestion
+    Event stream abstraction
+    Basic storage
+    Minimal dashboard
+
+Phase 2
+    Deterministic detection
+    Redis hot state
+    Rule engine
+    Basic incident generation
+
+Phase 3
+    Identity resolution
+    Cross-application correlation
+    Context graph
+
+Phase 4
+    Containment
+    Signed commands
+    Local policy cache
+    TTL + rollback
+
+Phase 5
+    Tetragon
+    Falco
+    Cilium/Hubble
+    Kernel-to-application correlation
+
+Phase 6
+    Optional LLM worker
+    Ambiguity resolution
+    Structured recommendations
+    Deterministic validation
+
+Phase 7
+    Hardening
+    Observability
+    Load testing
+    Failure testing
+    Security testing
+    Packaging
+
+============================================================
+21. BENCHMARK THE ENTIRE SYSTEM, NOT JUST INGESTION
+============================================================
+
+Measure at least:
+
+APPLICATION PATH
+- baseline request latency;
+- telemetry-enabled request latency;
+- p50/p95/p99/p99.9;
+- CPU overhead;
+- memory overhead.
+
+INGESTION
+- events/sec;
+- CPU;
+- memory;
+- serialization cost;
+- queue depth;
+- event loss.
+
+DETECTION
+- evaluation latency;
+- throughput;
+- correlation latency.
+
+CONTAINMENT
+- decision-to-dispatch;
+- dispatch-to-agent;
+- agent enforcement latency;
+- total detection-to-containment.
+
+RESILIENCE
+- control-plane outage;
+- Redis outage;
+- PostgreSQL outage;
+- LLM outage;
+- agent outage;
+- event burst/backpressure.
+
+The project should ultimately produce measured results, not assumed performance claims.
+
+============================================================
+22. ADD EXPLICIT "ROOT OF TRUST" BOUNDARIES
+============================================================
+
+Define the following hierarchy:
+
+    Sensors / Applications
+          |
+          v
+      Observations
+          |
+          v
+    Deterministic Security Core
+          |
+          +----> policy
+          |
+          +----> authorization
+          |
+          v
+    Response Authorization
+          |
+          v
+    Signed Commands
+          |
+          v
+       Agents
+
+The LLM is outside the root of trust.
+
+The dashboard is outside the root of trust.
+
+External telemetry sources are untrusted inputs and must be validated.
+
+============================================================
+23. SENSOR INPUTS ARE UNTRUSTED DATA
+============================================================
+
+Tetragon/Falco/Hubble outputs should not automatically be treated as unquestionable truth.
+
+The ingestion layer should:
+- validate schema;
+- validate source identity;
+- validate timestamps;
+- reject malformed events;
+- protect against oversized input;
+- rate-limit abusive producers;
+- preserve original source;
+- prevent event spoofing where possible.
+
+A compromised application should not be able to trivially forge authoritative security events for another application.
+
+============================================================
+24. PRIVILEGE SEPARATION
+============================================================
+
+Because this security platform can eventually isolate services and revoke identities, privilege must be minimized.
+
+Separate:
+- telemetry permissions;
+- analysis permissions;
+- policy-management permissions;
+- response permissions;
+- administrative UI permissions.
+
+The LLM worker should have NO direct infrastructure-control credentials.
+
+The dashboard should request actions through the policy/response subsystem.
+
+Agents should only execute a fixed, explicitly authorized action vocabulary.
+
+============================================================
+25. REVISE THE MASTER PLAN BEFORE IMPLEMENTATION
+============================================================
+
+After applying the above corrections, produce a revised Master Implementation Plan.
+
+The revised document should explicitly contain these architectural truths:
+
+1. Out-of-band by default.
+2. No synchronous security dependency for normal application requests.
+3. Redis = hot/volatile operational state.
+4. PostgreSQL = durable/historical security state.
+5. Event stream = decoupling boundary.
+6. Identity Resolution = first-class component.
+7. Tetragon/Falco/Hubble = distinct telemetry sources with preserved semantics.
+8. Deterministic policy engine = root of trust.
+9. LLM = optional, OFF by default, advisory only.
+10. LLM recommendations require deterministic validation and authorization.
+11. Containment = TTL + audit + rollback.
+12. Failure behavior is explicit per component.
+13. Performance claims are benchmark targets.
+14. Build through small vertical slices first.
+15. The security system must not become a new single point of failure.
+
+DO NOT implement the full system until this revised architecture has been internally checked for consistency and the Phase 1 vertical slice has been clearly defined.
+
+============================================================
+END OF REVIEW
+============================================================
