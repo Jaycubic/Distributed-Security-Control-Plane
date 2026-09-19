@@ -5,20 +5,64 @@
 [![React: 18.3](https://img.shields.io/badge/Frontend-React_%2B_TypeScript-61dafb.svg)](https://react.dev/)
 [![Architecture: Out--of--Band](https://img.shields.io/badge/Architecture-Out--of--Band_Control_Plane-emerald.svg)](#core-architectural-invariant)
 
-> **A high-performance, private security control plane that asynchronously observes multiple web applications, correlates heterogeneous telemetry across application and kernel layers, detects abnormal activity, and rapidly orchestrates surgical containment without placing expensive security analysis on the synchronous application request path.**
+> **An open-source, out-of-band security control plane for asynchronously collecting security telemetry, resolving identity, correlating activity across applications and runtime layers, detecting abnormal behavior, managing incidents, and coordinating containment without putting security analysis on the synchronous application request path.**
+
+**Core idea:** security should observe and control applications without becoming a dependency of their normal request path.
+
+[Architecture](#system-architecture) · [Quickstart](#quickstart--local-setup) · [Roadmap](#7-phase-development-roadmap) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Wiki](https://github.com/Jaycubic/Distributed-Security-Control-Plane/wiki)
+
+---
+
+## Why This Project?
+
+Security signals are distributed across application, runtime, kernel, and network layers. Looking at each stream independently can miss relationships between events that belong to the same actor, session, workload, or multi-stage attack sequence.
+
+This project explores a control-plane architecture in which applications continue serving normal traffic while a separate security system asynchronously collects telemetry, builds security context, detects suspicious behavior, manages incidents, and coordinates containment.
+
+```text
+APPLICATIONS
+    │
+    │ asynchronous telemetry
+    ▼
+SECURITY CONTROL PLANE
+    │
+    ├── Identity Resolution
+    ├── Cross-Application Correlation
+    ├── Deterministic Detection
+    ├── Risk & Policy
+    ├── Incident Management
+    └── Containment Coordination
+            │
+            │ signed command
+            ▼
+       LOCAL AGENT
+            │
+            ▼
+        ENFORCEMENT
+```
+
+## Project Status
+
+The repository is under active development and is organized as a phased security-engineering project.
+
+**Implemented:** Phase 1 architecture/ingestion/observable slice, Phase 2 deterministic detection and incidents, and Phase 3 identity resolution, cross-application correlation, and capability context.
+
+**Planned:** graduated containment, direct runtime telemetry adapters, optional off-path advisory AI, and full observability/packaging.
+
+This is an evolving engineering project; APIs, internal interfaces, and deployment assumptions may change as additional phases are implemented.
 
 ---
 
 ## The Problem with Inline Security
 
-Traditional inline Web Application Firewalls (WAFs) and security gateways force every application request through heavy synchronous inspection engines before returning a response. This creates critical operational problems:
+Traditional inline security gateways place security processing directly between the client and the protected application. This can couple application latency and availability to the security layer:
 
 ```text
 CONVENTIONAL INLINE GATEWAY (Fragile & Latency-Heavy):
 Client ──► [ Security Gateway / WAF ] ──► Application ──► Response
                │
-               └── Adds 10ms–50ms latency, single point of failure (SPOF),
-                   tail latency amplification, and availability risk.
+               └── Security processing becomes part of the request path
+                   and its availability boundary.
 ```
 
 1. **Every request pays the latency tax**: Complex rule evaluations and external calls delay real users.
@@ -152,23 +196,22 @@ flowchart TD
 
 ## Empirical Latency Benchmark Results
 
-A dedicated benchmark harness ([benchmarks/measure_overhead.py](file:///d:/AcademicPlanning/SecuritySystem/benchmarks/measure_overhead.py)) evaluates the exact synchronous impact of the non-blocking telemetry emitter across 1,000 real requests:
+A dedicated benchmark harness ([benchmarks/measure_overhead.py](benchmarks/measure_overhead.py)) evaluates the synchronous impact of the non-blocking telemetry emitter across 1,000 requests:
 
 ```text
 =================================================================
 DISTRIBUTED SECURITY CONTROL PLANE: EMPIRICAL OVERHEAD BENCHMARK
 Sample Size: 1000 requests
 =================================================================
-Metric       | Baseline (µs)    | With Telemetry (µs)  | Overhead (µs) 
+Metric       | Baseline (µs)    | With Telemetry (µs)
 ----------------------------------------------------------------------
-Mean         | 15460.73         | 15261.25             | 0.00
-p50          | 15951.60         | 15959.70             | 8.10
-p95          | 16139.20         | 16096.60             | 0.00
-p99          | 17054.20         | 16573.60             | 0.00
+Mean         | 15460.73         | 15261.25
+p50          | 15951.60         | 15959.70
+p95          | 16139.20         | 16096.60
+p99          | 17054.20         | 16573.60
 ======================================================================
-Conclusion: Telemetry emitter non-blocking queueing operates well within the
-SLO target overhead (Mean overhead: 0.00 µs, p99 overhead: 0.00 µs).
-Hard Architectural Invariant Preserved: Request path does not wait on controller.
+Hard Architectural Invariant Preserved:
+Request path does not wait on the security controller.
 ======================================================================
 ```
 
