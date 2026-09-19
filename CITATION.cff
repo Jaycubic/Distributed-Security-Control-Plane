@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: "Distributed Security Control Plane"
+message: "If you use this project in research, engineering work, or derivative systems, please cite the repository."
+type: software
+authors:
+  - family-names: "Joseph"
+    given-names: "Jofrey John"
+    alias: "Jaycubic"
+repository-code: "https://github.com/Jaycubic/Distributed-Security-Control-Plane"
+license: "AGPL-3.0"
