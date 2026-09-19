@@ -300,6 +300,21 @@ python tests/test_phase3_correlation.py
 
 ---
 
+
+## Areas of the Project
+
+This repository is focused on the engineering of an **out-of-band distributed security control plane** for modern applications and services. Relevant areas include **application security**, **runtime security**, **kernel security telemetry**, **eBPF security**, **cross-application threat detection**, **identity resolution**, **security event correlation**, **incident response**, **security automation**, **containment orchestration**, **security policy**, and **distributed systems**.
+
+Related technical concepts and ecosystems include **Rust security engineering**, **Cilium Tetragon**, **Falco**, **Cilium Hubble**, **Redis hot state**, **PostgreSQL security event storage**, **WebSocket security telemetry**, and **advisory AI for security operations**.
+
+Explore the dedicated documentation:
+
+- [Architecture Overview](docs/ARCHITECTURE.md)
+- [Use Cases](docs/USE-CASES.md)
+- [Detection & Correlation](docs/DETECTION-AND-CORRELATION.md)
+- [Changelog](CHANGELOG.md)
+
+---
 ## License
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. See the [LICENSE](LICENSE) file for full terms.
