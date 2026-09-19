@@ -4,7 +4,8 @@ members = [
     "crates/common",
     "crates/control-plane",
     "crates/agent-sdk",
-    "crates/engine"
+    "crates/engine",
+    "crates/correlator"
 ]
 
 [workspace.dependencies]

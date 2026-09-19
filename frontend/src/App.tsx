@@ -2,16 +2,20 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Shield, Activity, Server, Database, Eye, Terminal, 
   Cpu, CheckCircle, AlertTriangle, Flame,
-  ArrowUpRight, Play, Pause, Search, Radio, Lock, RefreshCw, XCircle
+  ArrowUpRight, Play, Pause, Search, Radio, Lock, RefreshCw, XCircle,
+  Network, Share2, Layers, GitMerge
 } from 'lucide-react';
-import { SecurityEvent, Incident } from './types';
+import { SecurityEvent, Incident, CanonicalEntity, CorrelationGraphData } from './types';
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'telemetry' | 'incidents'>('telemetry');
+  const [activeTab, setActiveTab] = useState<'telemetry' | 'incidents' | 'correlation'>('telemetry');
   const [events, setEvents] = useState<SecurityEvent[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [entities, setEntities] = useState<CanonicalEntity[]>([]);
+  const [graphData, setGraphData] = useState<CorrelationGraphData>({ nodes: [], edges: [] });
   const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null);
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
+  const [selectedEntity, setSelectedEntity] = useState<CanonicalEntity | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [selectedSensor, setSelectedSensor] = useState<string>('all');
@@ -39,8 +43,27 @@ export const App: React.FC = () => {
     }
   };
 
+  // Fetch canonical entities and context graph
+  const fetchEntitiesAndGraph = async () => {
+    try {
+      const entRes = await fetch('http://localhost:8080/api/v1/entities');
+      if (entRes.ok) {
+        const data = await entRes.json();
+        if (Array.isArray(data)) setEntities(data);
+      }
+      const graphRes = await fetch('http://localhost:8080/api/v1/correlation/graph');
+      if (graphRes.ok) {
+        const data = await graphRes.json();
+        if (data && data.nodes) setGraphData(data);
+      }
+    } catch (e) {
+      console.log('Entities/Graph fetch error:', e);
+    }
+  };
+
   useEffect(() => {
     fetchIncidents();
+    fetchEntitiesAndGraph();
   }, []);
 
   // Connect to Control Plane WebSocket live stream (events + incident alerts)
@@ -131,8 +154,64 @@ export const App: React.FC = () => {
   };
 
   // Simulate generating sample events via the ingestion API
-  const handleSimulateAttack = async (scenario: 'bruteforce' | 'recon' | 'kernel_shell') => {
-    if (scenario === 'bruteforce') {
+  const handleSimulateAttack = async (scenario: 'bruteforce' | 'recon' | 'kernel_shell' | 'multi_app_attack') => {
+    if (scenario === 'multi_app_attack') {
+      const attackerIp = `198.51.100.${Math.floor(Math.random() * 150 + 20)}`;
+      const attackerSession = `sess_${Math.random().toString(36).substring(7)}`;
+      const attackerUser = `compromised_user_${Math.floor(Math.random() * 900 + 100)}`;
+      const batch = [
+        // Stage 1: Recon on billing-service
+        {
+          event_id: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          app_id: 'billing-service',
+          environment: 'production',
+          event_type: 'http.unauthorized',
+          severity: 'medium',
+          source: { ip: attackerIp, sensor: { sensor_type: 'agent', raw_event_type: 'http' } },
+          action: { method: 'GET', endpoint: '/admin/config', status_code: 401, duration_us: 300, is_success: false },
+          is_security_significant: true
+        },
+        // Stage 2: Pivot to auth-portal with active session
+        {
+          event_id: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          app_id: 'auth-portal',
+          environment: 'production',
+          event_type: 'auth.login_success',
+          severity: 'low',
+          actor: { user_id: attackerUser, session_id: attackerSession },
+          source: { ip: attackerIp, sensor: { sensor_type: 'agent', raw_event_type: 'http' } },
+          action: { method: 'POST', endpoint: '/api/v1/auth/session', status_code: 200, duration_us: 150, is_success: true },
+          is_security_significant: false
+        },
+        // Stage 3: High impact mass data export on crm-service
+        {
+          event_id: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          app_id: 'crm-service',
+          environment: 'production',
+          event_type: 'data.export',
+          severity: 'high',
+          actor: { user_id: attackerUser, session_id: attackerSession },
+          source: { ip: attackerIp, sensor: { sensor_type: 'agent', raw_event_type: 'http' } },
+          action: { method: 'GET', endpoint: '/api/v1/customers/export', status_code: 200, duration_us: 8900, is_success: true },
+          resource: { resource_type: 'database', resource_id: 'customer_vault' },
+          is_security_significant: true
+        }
+      ];
+      try {
+        await fetch('http://localhost:8080/api/v1/telemetry', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batch)
+        });
+        setTimeout(fetchEntitiesAndGraph, 500);
+        setActiveTab('correlation');
+      } catch (e) {
+        console.error(e);
+      }
+    } else if (scenario === 'bruteforce') {
       const attackerIp = `198.51.100.${Math.floor(Math.random() * 200 + 10)}`;
       const batch: any[] = [];
       for (let i = 0; i < 12; i++) {
@@ -264,7 +343,7 @@ export const App: React.FC = () => {
               Distributed Security Control Plane
             </h1>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '4px 0 0 0' }}>
-              Phase 2: Hot State Sliding Windows & Deterministic Detection Engine (Mode A)
+              Phase 3: Identity Resolution, In-Memory Context Graph & Cross-App Correlation
             </p>
           </div>
         </div>
@@ -306,6 +385,27 @@ export const App: React.FC = () => {
                   fontSize: '0.7rem', padding: '1px 6px', borderRadius: 10, fontWeight: 700 
                 }}>
                   {openIncidents.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => { setActiveTab('correlation'); fetchEntitiesAndGraph(); }}
+              style={{
+                background: activeTab === 'correlation' ? 'rgba(168, 85, 247, 0.2)' : 'transparent',
+                border: activeTab === 'correlation' ? '1px solid #a855f7' : '1px solid transparent',
+                color: activeTab === 'correlation' ? '#fff' : 'var(--text-secondary)',
+                padding: '6px 14px', borderRadius: 7, cursor: 'pointer', fontSize: '0.82rem', fontWeight: 600,
+                display: 'flex', alignItems: 'center', gap: 6, transition: 'all 0.15s ease'
+              }}
+            >
+              <Network size={14} color={activeTab === 'correlation' ? '#a855f7' : 'inherit'} />
+              Identity & Correlation
+              {entities.length > 0 && (
+                <span style={{ 
+                  background: '#a855f7', color: '#fff', 
+                  fontSize: '0.7rem', padding: '1px 6px', borderRadius: 10, fontWeight: 700 
+                }}>
+                  {entities.length}
                 </span>
               )}
             </button>
@@ -417,7 +517,7 @@ export const App: React.FC = () => {
                 </button>
               ))}
             </>
-          ) : (
+          ) : activeTab === 'incidents' ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)' }}>
                 Incident Lifecycle & Threat Queue
@@ -433,11 +533,27 @@ export const App: React.FC = () => {
                 <RefreshCw size={12} /> Refresh
               </button>
             </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                Canonical Identity Directory & Context Graph ({entities.length} Entities, {graphData.nodes.length} Nodes)
+              </span>
+              <button
+                onClick={fetchEntitiesAndGraph}
+                style={{
+                  background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-secondary)', padding: '4px 8px', borderRadius: 6, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.75rem'
+                }}
+              >
+                <RefreshCw size={12} /> Refresh
+              </button>
+            </div>
           )}
         </div>
 
-        {/* Phase 2 Attack Scenarios Simulation Bar */}
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+        {/* Attack Scenarios Simulation Bar */}
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>
             Simulate Attack:
           </span>
@@ -480,7 +596,21 @@ export const App: React.FC = () => {
               fontSize: '0.78rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6
             }}
           >
-            🚨 Kernel eBPF Shell (/bin/sh)
+            🚨 Kernel eBPF Shell
+          </button>
+
+          <button
+            id="btn-sim-multi-app"
+            onClick={() => handleSimulateAttack('multi_app_attack')}
+            style={{
+              background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(99, 102, 241, 0.25))',
+              border: '1px solid #a855f7',
+              color: '#d8b4fe',
+              padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
+              fontSize: '0.78rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6
+            }}
+          >
+            <Share2 size={13} /> ⚡ 3-App Attack Chain
           </button>
         </div>
       </div>
@@ -648,7 +778,7 @@ export const App: React.FC = () => {
             </div>
           )}
         </div>
-      ) : (
+      ) : activeTab === 'incidents' ? (
         /* Phase 2: Active Incidents & Containment View */
         <div style={{ display: 'grid', gridTemplateColumns: selectedIncident ? '1fr 480px' : '1fr', gap: 18 }}>
           <div className="glass-panel" style={{ padding: 20 }}>
@@ -862,6 +992,230 @@ export const App: React.FC = () => {
                           <span className={`badge-mono sev-${ev.severity}`}>{ev.severity}</span>
                         </div>
                         <div style={{ fontWeight: 600 }}>{ev.event_type} - {ev.action?.endpoint || ev.source.process_name || 'N/A'}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Phase 3: Canonical Identity & Context Graph Explorer */
+        <div style={{ display: 'grid', gridTemplateColumns: selectedEntity ? '1fr 480px' : '1fr', gap: 18 }}>
+          {/* Left Column: Canonical Entities Table / Cards */}
+          <div className="glass-panel" style={{ padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h2 style={{ fontSize: '1.05rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Network size={18} color="#a855f7" />
+                Canonical Identities ({entities.length})
+              </h2>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                Cross-App Resolved Actors & Capability Context
+              </span>
+            </div>
+
+            {entities.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)' }}>
+                <Network size={36} color="rgba(255,255,255,0.15)" style={{ margin: '0 auto 12px' }} />
+                <p style={{ margin: 0, fontSize: '0.9rem', fontWeight: 600 }}>No Canonical Entities Resolved Yet</p>
+                <p style={{ margin: '6px 0 0', fontSize: '0.8rem' }}>
+                  Click "⚡ 3-App Attack Chain" above to simulate a multi-application compromise and observe identity linking.
+                </p>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 14 }}>
+                {entities.map((ent) => {
+                  const isSelected = selectedEntity?.entity_id === ent.entity_id;
+                  return (
+                    <div
+                      key={ent.entity_id}
+                      onClick={() => setSelectedEntity(ent)}
+                      style={{
+                        padding: 16,
+                        borderRadius: 10,
+                        cursor: 'pointer',
+                        background: isSelected ? 'rgba(168, 85, 247, 0.15)' : 'rgba(255,255,255,0.02)',
+                        border: `1px solid ${isSelected ? '#a855f7' : 'var(--border-subtle)'}`,
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                            <span style={{
+                              fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase',
+                              padding: '2px 8px', borderRadius: 10,
+                              background: ent.entity_type === 'user' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(168, 85, 247, 0.2)',
+                              color: ent.entity_type === 'user' ? 'var(--accent-cyan)' : '#c084fc',
+                              border: `1px solid ${ent.entity_type === 'user' ? 'var(--accent-cyan)' : '#a855f7'}`
+                            }}>
+                              {ent.entity_type}
+                            </span>
+                            <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>
+                              {ent.display_name}
+                            </span>
+                          </div>
+                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            {ent.entity_id}
+                          </div>
+                        </div>
+
+                        <span style={{
+                          fontFamily: 'var(--font-mono)', fontSize: '0.72rem',
+                          background: 'rgba(255,255,255,0.06)', padding: '2px 8px', borderRadius: 4,
+                          color: 'var(--text-secondary)'
+                        }}>
+                          {ent.event_count} events
+                        </span>
+                      </div>
+
+                      {/* Linked Identities details */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: '0.75rem', marginBottom: 12 }}>
+                        {ent.linked_ips.length > 0 && (
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', minWidth: 60 }}>IPs ({ent.linked_ips.length}):</span>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              {ent.linked_ips.map((ip) => (
+                                <span key={ip} style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4, fontFamily: 'var(--font-mono)' }}>
+                                  {ip}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {ent.linked_sessions.length > 0 && (
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', minWidth: 60 }}>Sessions:</span>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              {ent.linked_sessions.map((sid) => (
+                                <span key={sid} style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                                  {sid}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {ent.apps_seen.length > 0 && (
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', minWidth: 60 }}>Apps:</span>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              {ent.apps_seen.map((app) => (
+                                <span key={app} style={{ background: 'rgba(16, 185, 129, 0.12)', color: 'var(--accent-emerald)', padding: '1px 6px', borderRadius: 4 }}>
+                                  {app}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Deno-inspired Exercised Capabilities */}
+                      {ent.exercised_capabilities.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 4, fontWeight: 700 }}>
+                            Exercised Capabilities
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {ent.exercised_capabilities.map((cap) => (
+                              <span
+                                key={cap}
+                                style={{
+                                  fontSize: '0.68rem',
+                                  padding: '2px 6px',
+                                  borderRadius: 4,
+                                  background: cap.includes('export') || cap.includes('execute') || cap.includes('admin')
+                                    ? 'rgba(244, 63, 94, 0.15)'
+                                    : 'rgba(56, 189, 248, 0.12)',
+                                  color: cap.includes('export') || cap.includes('execute') || cap.includes('admin')
+                                    ? '#f43f5e'
+                                    : 'var(--accent-cyan)',
+                                  border: `1px solid ${cap.includes('export') || cap.includes('execute') || cap.includes('admin') ? 'rgba(244, 63, 94, 0.3)' : 'rgba(56, 189, 248, 0.3)'}`
+                                }}
+                              >
+                                {cap}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Right Column: Entity Graph Inspector */}
+          {selectedEntity && (
+            <div className="glass-panel" style={{ padding: 20, display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <GitMerge size={16} color="#a855f7" />
+                  Context Graph: {selectedEntity.display_name}
+                </h3>
+                <button
+                  onClick={() => setSelectedEntity(null)}
+                  style={{
+                    background: 'none', border: 'none', color: 'var(--text-muted)',
+                    cursor: 'pointer', padding: 2
+                  }}
+                >
+                  <XCircle size={18} />
+                </button>
+              </div>
+
+              <div style={{ overflowY: 'auto', flex: 1, paddingRight: 4 }}>
+                <div style={{ padding: 12, background: 'rgba(0,0,0,0.3)', borderRadius: 8, marginBottom: 14 }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 2 }}>Canonical ID</div>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', color: '#c084fc', wordBreak: 'break-all' }}>
+                    {selectedEntity.entity_id}
+                  </div>
+                </div>
+
+                {/* Subgraph Nodes and Edges */}
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 8, fontWeight: 700 }}>
+                    Connected Graph Topology
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {graphData.edges
+                      .filter((e) => e.source === selectedEntity.entity_id || e.target === selectedEntity.entity_id)
+                      .map((edge) => (
+                        <div
+                          key={edge.id}
+                          style={{
+                            padding: 8, background: 'rgba(255,255,255,0.02)', borderRadius: 6,
+                            borderLeft: '3px solid #a855f7', fontSize: '0.75rem'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', marginBottom: 2 }}>
+                            <span style={{ color: '#c084fc', fontWeight: 700 }}>{edge.relation}</span>
+                            <span style={{ color: 'var(--text-muted)' }}>{edge.count} hits</span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)' }}>
+                            <span style={{ color: 'var(--text-muted)' }}>{edge.source === selectedEntity.entity_id ? 'Target:' : 'Source:'}</span>
+                            <span style={{ fontWeight: 600, color: '#fff' }}>
+                              {edge.source === selectedEntity.entity_id ? edge.target : edge.source}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+
+                {/* All Cross-App Observed Nodes */}
+                <div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 8, fontWeight: 700 }}>
+                    Applications in Attack/Activity Chain ({selectedEntity.apps_seen.length})
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {selectedEntity.apps_seen.map((app) => (
+                      <div key={app} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 8, background: 'rgba(0,0,0,0.25)', borderRadius: 6, fontSize: '0.8rem' }}>
+                        <Server size={14} color="var(--accent-emerald)" />
+                        <span style={{ fontWeight: 600 }}>{app}</span>
                       </div>
                     ))}
                   </div>

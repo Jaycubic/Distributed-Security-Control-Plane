@@ -91,3 +91,46 @@ export interface Incident {
   created_at: string;
   updated_at: string;
 }
+
+export interface CanonicalEntity {
+  entity_id: string;
+  entity_type: 'host' | 'session' | 'workload' | 'user';
+  display_name: string;
+  linked_ips: string[];
+  linked_sessions: string[];
+  linked_user_ids: string[];
+  linked_containers: string[];
+  linked_pids: number[];
+  apps_seen: string[];
+  exercised_capabilities: string[];
+  risk_score: number;
+  first_seen: string;
+  last_seen: string;
+  event_count: number;
+}
+
+export interface GraphNode {
+  id: string;
+  category: 'entity' | 'application' | 'resource' | 'endpoint' | 'host';
+  label: string;
+  first_seen: string;
+  last_seen: string;
+  hit_count: number;
+  metadata: Record<string, string>;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  count: number;
+  first_seen: string;
+  last_seen: string;
+  weight: number;
+}
+
+export interface CorrelationGraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}

@@ -77,6 +77,15 @@ impl RuleEngine {
         Ok(generated_signals)
     }
 
+    /// Public method to ingest a security signal from an external source (e.g. Correlation Engine)
+    pub async fn ingest_signal(
+        &self,
+        signal: SecuritySignal,
+        event: &SecurityEvent,
+    ) -> Result<(), HotStateError> {
+        self.process_signal(signal, event).await
+    }
+
     async fn process_signal(
         &self,
         signal: SecuritySignal,

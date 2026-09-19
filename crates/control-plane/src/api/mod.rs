@@ -13,6 +13,7 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use security_control_plane_common::{validate_security_event, SecurityEvent};
+use security_control_plane_correlator::CorrelationEngine;
 use security_control_plane_engine::{IncidentStatus, RuleEngine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -25,6 +26,7 @@ pub struct AppState {
     pub stream: Arc<MemoryEventStream>,
     pub durable_sink: Arc<dyn DurableEventSink>,
     pub engine: Arc<RuleEngine>,
+    pub correlator: Arc<CorrelationEngine>,
 }
 
 #[derive(Serialize)]
@@ -56,6 +58,11 @@ pub struct UpdateIncidentStatusRequest {
     pub status: String,
 }
 
+#[derive(Deserialize)]
+pub struct GraphQuery {
+    pub entity_id: Option<String>,
+}
+
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/telemetry", post(handle_telemetry))
@@ -65,6 +72,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/incidents", get(handle_get_incidents))
         .route("/api/v1/incidents/:id", get(handle_get_incident_by_id))
         .route("/api/v1/incidents/:id/status", post(handle_update_incident_status))
+        .route("/api/v1/entities", get(handle_get_entities))
+        .route("/api/v1/entities/:id", get(handle_get_entity_by_id))
+        .route("/api/v1/correlation/graph", get(handle_get_correlation_graph))
         .route("/api/v1/ws/events", get(handle_ws_events))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -160,6 +170,44 @@ async fn handle_update_incident_status(
         )
             .into_response()
     }
+}
+
+async fn handle_get_entities(State(state): State<AppState>) -> impl IntoResponse {
+    let resolver = state.correlator.identity_resolver();
+    let lock = resolver.read().await;
+    let entities = lock.list_entities();
+    (StatusCode::OK, Json(serde_json::json!(entities))).into_response()
+}
+
+async fn handle_get_entity_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let resolver = state.correlator.identity_resolver();
+    let lock = resolver.read().await;
+    if let Some(entity) = lock.get(&id).or_else(|| lock.get_by_alias(&id)) {
+        (StatusCode::OK, Json(serde_json::json!(entity))).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Entity '{}' not found", id) })),
+        )
+            .into_response()
+    }
+}
+
+async fn handle_get_correlation_graph(
+    State(state): State<AppState>,
+    Query(query): Query<GraphQuery>,
+) -> impl IntoResponse {
+    let graph = state.correlator.context_graph();
+    let lock = graph.read().await;
+    let sub = if let Some(entity_id) = query.entity_id {
+        lock.get_subgraph(&entity_id)
+    } else {
+        lock.get_full_graph()
+    };
+    (StatusCode::OK, Json(serde_json::json!(sub))).into_response()
 }
 
 async fn handle_telemetry(

@@ -1,348 +1,376 @@
-# Distributed Security Control Plane: Master Implementation Plan
+# Distributed Security Control Plane: Master Implementation Plan (v2)
 
-A high-performance, out-of-band security intelligence, correlation, and rapid containment platform designed to protect heterogeneous web applications without placing heavy security analysis in the synchronous request path.
+A high-performance, out-of-band security intelligence, cross-application correlation, and surgical containment platform designed to protect heterogeneous web applications without placing latency-heavy security inspection into the synchronous request path.
+
+---
+
+## 1. Architectural Invariants & Review Directives
+
+The architecture strictly adheres to the foundational invariants reaffirmed in [Master Architecture v2](file:///d:/AcademicPlanning/SecuritySystem/Distributed_Security_Control_Plane_Master_Architecture_v2.md):
+
+1. **Hard Out-of-Band Invariant**:  
+   > *"Normal application requests must never wait for security ingestion, correlation, detection, LLM analysis, or the security controller."*  
+   The Security Control Plane is **not** an inline reverse proxy or synchronous gateway. Normal application traffic remains strictly `Client -> Application -> Response`. Security telemetry is emitted asynchronously as a non-blocking side-effect.
+2. **Deterministic Security Core as Root of Trust**:  
+   The deterministic Rust policy and rule engines represent the sole root of trust. Sensor feeds are untrusted inputs. The frontend dashboard and advisory LLM sit strictly outside the root of trust.
+3. **Empirical Benchmarks, Not Presumed Guarantees**:  
+   Overhead metrics (e.g., telemetry emission latency, ingestion throughput, detection-to-containment speed) are treated as **benchmark targets and SLOs** measured at p50, p95, p99, and p99.9, never assumed.
+4. **Decoupled Event Stream Abstraction**:  
+   Ingestion feeds a high-throughput `EventStream` (in-memory ring-buffer / Redis Streams) consumed independently by the Detector, Correlator, and Durable Event Writer.
+5. **Strict Dual-Tier State Separation**:  
+   - **Hot / Volatile State (Redis / In-Memory)**: *"What is happening now?"* — sliding-window rate counters, active risk accumulators, temporary revocation sets, short-lived correlation buffers.
+   - **Durable / Historical State (PostgreSQL)**: *"What happened and what did we decide?"* — security-significant events, incidents, policy versions, containment history, cryptographically verifiable audit logs, and evidence references.
+6. **Selective Persistence (No Raw Telemetry Flooding)**:  
+   High-volume raw telemetry expires naturally from hot state. Only security-significant events, incident-linked evidence, and compliance audit records are persisted durably.
+7. **Identity Resolution Precedes Correlation**:  
+   Disparate identifiers (`source_ip`, `session_token`, `auth_user_id`, `container_id`, `pid`) are canonicalized into an `EntityContext` before building cross-application attack chains.
+8. **Deno-Inspired Capability Security Model**:  
+   Security policies and containment actions are modeled on **fine-grained capabilities and scoped permissions** (inspired by Deno's permission architecture), avoiding coarse binary controls.
+9. **Explicit Allow / Deny with Deterministic Precedence**:  
+   Policies evaluate scoped capabilities where **DENY always takes precedence** over ALLOW. Every decision produces an explainable audit record.
+10. **Advisory LLM Boundary (Mode B, OFF by default)**:  
+    Mode A (deterministic, zero LLM) is the default baseline. Mode B is invoked only for ambiguous incidents. The LLM produces structured JSON recommendations that **must pass schema validation and deterministic policy authorization** before any command is signed. Zero direct execution privileges.
+11. **Containment with Reversible TTLs and Ed25519 Signatures**:  
+    Containment actions carry mandatory expiration TTLs, automated rollback recipes, and Ed25519 cryptographic signatures with replay protection.
+12. **Explicit Component-Level Failure Modes**:  
+    Every subsystem defines isolated behavior under failure (controller down, Redis down, Postgres down, LLM down, agent disconnected), preventing security infrastructure from becoming an outage trigger.
+
+---
+
+## 2. Target Architecture & Component Topology
+
+```mermaid
+flowchart TD
+    subgraph DataPlane ["DATA PLANE (Heterogeneous Apps)"]
+        Client[Client Request] --> AppA[Application A: FastAPI]
+        Client --> AppB[Application B: Node.js]
+        AppA --> AppAResp[Normal Response <2ms]
+        AppB --> AppBResp[Normal Response <2ms]
+        
+        AppA -.->|Async Non-Blocking Emitter| AgentA[Agent / Middleware]
+        AppB -.->|Async Non-Blocking Emitter| AgentB[Agent / Middleware]
+    end
+
+    subgraph RuntimeSensors ["KERNEL & RUNTIME SENSORS (eBPF)"]
+        Tetra[Cilium Tetragon<br/>Process Lifecycle & Kernel Probes]
+        Falc[Falco<br/>Syscall Behavioral Rules]
+        Hubb[Cilium Hubble<br/>L3/L4/L7 Network Flows]
+    end
+
+    subgraph IngestionStream ["INGESTION & EVENT STREAM"]
+        Ingest[Axum Ingestion Service<br/>Schema Validation & Rate Limiting]
+        Stream[(Event Stream Abstraction<br/>Redis Streams / Channel Buffer)]
+    end
+
+    subgraph ControlPlaneCore ["SECURITY CORE (Root of Trust)"]
+        IdRes[Identity Resolution Layer<br/>IP / Session / User Canonicalizer]
+        Detect[Deterministic Rule Engine<br/>Sliding Windows & Burst Counters]
+        Corr[Cross-App Correlation Engine<br/>In-Memory Context Graph]
+        Policy[Deno-Inspired Capability Policy Engine<br/>Explicit Allow/Deny & State Machine]
+        Incident[Incident Lifecycle Manager]
+        Signer[Ed25519 Command Signer]
+    end
+
+    subgraph StateStorage ["DUAL-TIER STATE MANAGEMENT"]
+        RedisHot[(Redis: Hot State<br/>Sliding Windows / Blacklists / TTL Windows)]
+        PostgresDurable[(PostgreSQL: Durable State<br/>Incidents / Policies / Filtered Events / Audit)]
+    end
+
+    subgraph OffPathLLM ["OFF-PATH ADVISORY REASONING (Mode B - Optional)"]
+        LLMWorker[Python Advisory Worker<br/>Async Incident Queue Consumer]
+        LLMModel[LLM Provider / Local Model]
+    end
+
+    subgraph Operations ["OPERATIONS & VISIBILITY"]
+        AdminUI[Dashboard: React + TypeScript<br/>WebSocket Feed & Threat Console]
+        Prom[Prometheus Metrics]
+        Graf[Grafana Dashboards]
+    end
+
+    %% Telemetry Connections
+    AgentA -->|Async HTTP Batch| Ingest
+    AgentB -->|Async HTTP Batch| Ingest
+    Tetra -->|JSON / gRPC Feed| Ingest
+    Falc -->|Alert Webhook / UDS| Ingest
+    Hubb -->|Flow Log Feed| Ingest
+
+    Ingest --> Stream
+    Stream --> IdRes
+    IdRes --> Detect
+    IdRes --> Corr
+    Detect --> Policy
+    Corr --> Policy
+    Policy --> Incident
+    Policy --> Signer
+
+    Stream -->|Selective Durable Writer| PostgresDurable
+    Detect <--> RedisHot
+    Corr <--> RedisHot
+    Incident --> PostgresDurable
+    Policy --> PostgresDurable
+
+    Incident -.->|Ambiguous Incident Request| LLMWorker
+    LLMWorker --> LLMModel
+    LLMWorker -.->|Structured JSON Recommendation| Policy
+
+    Signer -->|Signed Command with TTL| AgentA
+    Signer -->|Signed Command with TTL| AgentB
+
+    Incident --> AdminUI
+    AdminUI -.->|Manual Approval / Rollback| Policy
+    Ingest --> Prom
+    Detect --> Prom
+    Prom --> Graf
+```
+
+---
+
+## 3. Deno-Inspired Security Abstractions (Adaptation Spec)
+
+Following the principles defined in [Master Architecture v2 Section 22](file:///d:/AcademicPlanning/SecuritySystem/Distributed_Security_Control_Plane_Master_Architecture_v2.md#22-deno-inspired-security-abstractions), the system integrates Deno's permission and capability concepts into our Rust core without adopting Deno as a runtime:
+
+### 3.1 Fine-Grained Capabilities & Scopes
+Instead of coarse or arbitrary containment verbs, operations are represented by structured **Capabilities**:
+- `database.read` / `database.write` (scoped by target table/collection or DB host)
+- `network.connect` (scoped by host/CIDR and port, e.g. `postgres.internal:5432` vs `*`)
+- `filesystem.read` / `filesystem.write` (scoped by path prefix, e.g. `/app/storage/**` vs `/etc/**`)
+- `process.execute` (scoped by binary path, e.g. `/bin/sh`, `curl`, `socat`)
+- `admin.operation` / `session.authenticate`
+
+```rust
+pub struct Capability {
+    pub capability_type: CapabilityType,
+    pub resource: String,      // e.g. "postgres.internal:5432" or "/etc/shadow"
+    pub scope: ScopePattern,   // exact, glob, or cidr
+    pub status: PermissionState,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+```
+
+### 3.2 Runtime Permission State Transitions
+Permissions are dynamic state machines, not static booleans:
+- **`Granted`**: Normal operating permission.
+- **`Denied`**: Explicitly forbidden by policy.
+- **`Restricted`**: Permitted under reduced rate/scope (e.g. throttled or read-only).
+- **`Revoked`**: Temporarily suspended due to active incident containment.
+
+### 3.3 Declarative Versioned Policy Bundles
+Human-readable, declarative policy definitions (YAML / JSON) with strict precedence:
+```yaml
+policy_id: "app-payment-service-v2"
+version: 2
+target_app: "billing-service"
+
+rules:
+  allow:
+    network:
+      - "postgres.internal:5432"
+      - "redis.internal:6379"
+    filesystem:
+      - "/app/data/**"
+  deny:
+    network:
+      - "*"
+    process:
+      - "/bin/sh"
+      - "/bin/bash"
+      - "curl"
+      - "nc"
+```
+- **Precedence Invariant**: **`DENY` takes absolute precedence over `ALLOW`**. If an action matches both an allow rule and a deny rule, it is strictly denied.
+
+### 3.4 Policy Decision Explainability
+Every authorization check generates a transparent decision audit record:
+```json
+{
+  "decision_id": "dec_8f3a9e10",
+  "who": "principal:user_481",
+  "actor_entity": "ip:203.0.113.55",
+  "action": "network.connect",
+  "target_resource": "external.malicious.net:443",
+  "policy_id": "app-payment-service-v2",
+  "decision": "DENY",
+  "reason": "Matched explicit deny rule 'network: *'",
+  "evidence_event_ids": ["ev_1029384"],
+  "timestamp": "2026-09-19T19:00:00Z"
+}
+```
+
+### 3.5 Policy Simulation & Dry Run (Mode C)
+The policy engine can evaluate recorded historical events or live telemetry in **dry-run simulation mode**, emitting prospective decisions (`WOULD_ALLOW`, `WOULD_DENY`, `WOULD_REVOKE`) to validate policy changes before live rollout.
+
+---
+
+## 4. Phased Implementation Roadmap
+
+```text
+[x] Phase 1: Architecture Core, Ingestion Pipeline & Minimal Observable Slice
+[x] Phase 2: Hot State Operational Engine & Deterministic Rule Detection (Mode A)
+[ ] Phase 3: Identity Resolution, Cross-App Correlation & Capability Context
+[ ] Phase 4: Deno-Inspired Capability Policy Engine & Graduated Containment
+[ ] Phase 5: Kernel & Runtime Telemetry Adapters (Tetragon, Falco, Hubble)
+[ ] Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B)
+[ ] Phase 7: Production Hardening, Multi-Dimensional Benchmarking & Packaging
+```
+
+---
+
+### [COMPLETED] Phase 1: Architecture Core, Ingestion Pipeline & Minimal Observable Slice
+- Unified event schema (`crates/common`) with typed actor, source, action, and resource models.
+- Decoupled `EventStream` abstraction with `MemoryEventStream` and Redis Streams backends.
+- Asynchronous Axum telemetry ingestion (`POST /api/v1/telemetry`) returning in $<100$ µs.
+- Non-blocking application emitters (Python FastAPI, Node.js).
+- Empirical benchmark harness ([measure_overhead.py](file:///d:/AcademicPlanning/SecuritySystem/benchmarks/measure_overhead.py)) verifying 0 µs synchronous request overhead.
+- Live WebSocket streaming (`/api/v1/ws/events`) and initial React + Vite dashboard.
+
+---
+
+### [COMPLETED] Phase 2: Hot State Operational Engine & Deterministic Rule Detection (Mode A)
+- `HotStateStore` trait (`crates/engine/src/state/mod.rs`) with Redis sorted sets and thread-safe in-memory sliding-window buffer.
+- Sliding-window frequency and distinct-count tracking (`record_hit`, `record_distinct`, `get_count`).
+- Deterministic rules (`crates/engine/src/rules/mod.rs`):
+  * Credential Brute-Force / Password Spray ($\ge 10$ failed auths in 60s).
+  * Rapid API / Directory Enumeration ($\ge 20$ 404s or $\ge 25$ distinct routes in 60s).
+  * Unauthorized Access Bursts ($\ge 15$ 401/403 errors in 60s).
+  * Suspicious Container / Kernel Shell Execution (`/bin/sh`, `/bin/bash`, `nc` inside containers).
+- Dynamic risk scoring and incident synthesis (`crates/engine/src/incident.rs`):
+  * Dynamic escalation: $\ge 25 \to$ Medium, $\ge 50 \to$ High, $\ge 100 \to$ Critical.
+  * Lifecycle state machine: `Open`, `Investigating`, `Contained`, `Resolved`, `FalsePositive`.
+- Control plane incident endpoints: `GET /api/v1/incidents`, `GET /api/v1/incidents/:id`, `POST /api/v1/incidents/:id/status`.
+- Frontend threat console with live incident cards, risk meters, and attack simulation dispatchers.
+- Complete unit and end-to-end integration test suites verified passing.
+
+---
+
+### [NEXT MILESTONE] Phase 3: Identity Resolution, Cross-App Correlation & Capability Context
+
+**Goal**: Connect disparate events across multiple applications into a unified attack chain using a canonical identity model and capability context.
+
+#### Key Deliverables:
+1. **Identity Resolution Layer (`crates/correlator/identity.rs`)**:
+   - Multi-identifier entity canonicalization:
+     * Network layer: `source_ip`, `client_port`.
+     * Device layer: `user_agent`, `device_fingerprint`.
+     * Application layer: `session_id`, `jwt_jti`, `user_id`, `tenant_id`.
+     * Infrastructure layer: `container_id`, `pod_name`, `pid`, `namespace`.
+   - Cross-application entity resolution: linking App A session with App B actions when sharing an auth identity or verified IP/token bridge.
+2. **In-Memory Context Graph (`crates/correlator/graph.rs`)**:
+   - High-performance, TTL-bounded in-memory graph tracking entity-to-entity and entity-to-resource relationships across Application A, B, and C.
+   - Zero external graph database dependency (pure Rust in-memory structures with automated TTL eviction).
+3. **Multi-Stage Cross-App Attack Sequence Detector**:
+   - Detects attack progression across applications (e.g., Reconnaissance on App A $\to$ Credential stuffing on App A $\to$ Privilege use on App B $\to$ Data export on App C).
+4. **Capability Context Enrichment**:
+   - Enriches canonical entities with exercised capability metadata (`database.read`, `admin.operation`, `process.execute`) preparing for Phase 4 policy enforcement.
+5. **Explainable Incident Timeline & Evidence Graph**:
+   - Visual attack-chain lineage exposed via REST/WebSocket API and rendered in the dashboard.
+6. **Testing & Verification Suite**:
+   - Unit tests for entity canonicalization, session linking, and graph TTL expiration.
+   - Integration test (`tests/test_phase3_correlation.py`) simulating a 3-stage multi-application attack sequence.
+
+---
+
+### Phase 4: Deno-Inspired Capability Policy Engine & Graduated Containment
+
+**Goal**: Deploy declarative, fine-grained capability policies with explicit allow/deny semantics and surgical, Ed25519-signed containment commands with automatic TTL rollback.
+
+#### Key Deliverables:
+1. **Declarative Capability Policy Engine (`crates/engine/src/policy/`)**:
+   - Scoped permissions model (`network.connect`, `database.read`, `process.execute`, etc.).
+   - Versioned YAML/JSON policy bundle parser.
+   - Strict evaluation algorithm: **`DENY` takes absolute precedence over `ALLOW`**.
+   - Dynamic permission states (`Granted`, `Denied`, `Restricted`, `Revoked`).
+2. **Explainable Policy Decision Engine**:
+   - Generates transparent, auditable decision records answering WHO, WHAT, ON WHICH RESOURCE, UNDER WHICH POLICY, and WHY.
+3. **Policy Simulation & Dry-Run Mode (Mode C)**:
+   - CLI / API dry-run capability to evaluate policy bundles against recorded or synthetic event streams without enforcing actions.
+4. **Policy Regression Test Framework**:
+   - Automated test harness to verify policy assertions (e.g., given actor $X$ and resource $Y$, assert expected $Z$).
+5. **Graduated Containment Capabilities**:
+   - Concrete implementations: `REVOKE_CAPABILITY`, `RESTRICT_SCOPE`, `THROTTLE_ACTOR`, `REVOKE_SESSION`, `BLOCK_NETWORK`, `ISOLATE_SERVICE`.
+6. **Cryptographically Signed Control Channel (`crates/common/src/crypto.rs`)**:
+   - Ed25519 command signing by Control Plane; signature and nonce validation in local agents.
+   - Mandatory expiration TTLs and automated rollback routines.
+7. **Interactive Dashboard Policy & Containment Console**:
+   - Policy bundle editor/viewer, decision explainability drawer, and active containment rollback controls.
+
+---
+
+### Phase 5: Kernel & Runtime Telemetry Adapters (Tetragon, Falco, Hubble)
+
+**Goal**: Ingest rich eBPF telemetry from mature CNCF runtime engines, marrying host-level kernel activity with application identities without writing custom kernel code.
+
+#### Key Deliverables:
+1. **Sensor Ingestion Adapters (`crates/sensors/`)**:
+   - **Tetragon Adapter**: Ingests JSON/gRPC event feeds for container process execution (`process_exec`), namespace modifications, and socket creation (`process_kprobe`).
+   - **Falco Adapter**: Ingests JSON alert streams over Unix Domain Sockets or HTTP webhooks for syscall anomalies.
+   - **Cilium Hubble Adapter**: Normalizes L3/L4 flows, DNS queries, and network drops.
+2. **Compound Kernel-to-Application Correlation**:
+   - Correlates container PID, network socket tuples, and container IDs with application HTTP context and `request_id`.
+3. **Runtime Anomaly Rules**:
+   - Detection of unexpected shells or utilities (`/bin/sh`, `curl`, `socat`) spawned inside application containers.
+
+---
+
+### Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B)
+
+**Goal**: Provide an asynchronous investigation assistant for ambiguous incidents while keeping the deterministic control plane completely autonomous.
+
+#### Key Deliverables:
+1. **Dual Mode Controller**:
+   - Mode A (Deterministic) active by default. Mode B enabled explicitly via configuration.
+2. **Python Advisory Worker (`services/llm-worker/`)**:
+   - Async service consuming ambiguous incident payloads from an isolated Redis queue.
+   - Strict Pydantic output schemas returning threat classification, confidence, reasoning summary, and recommended response capabilities.
+3. **Deterministic Policy Validation Gate**:
+   - Rust policy engine validates LLM recommendations against active organizational policies before any recommendation can become a signed command.
+   - Zero direct execution capabilities granted to the LLM worker.
+
+---
+
+### Phase 7: Production Hardening, Multi-Dimensional Benchmarking & Packaging
+
+**Goal**: Package the entire system into a reproducible deployment with comprehensive observability, resilience testing, and empirical benchmark reports.
+
+#### Key Deliverables:
+1. **Full-Stack Docker Deployment (`deploy/docker-compose.yml`)**:
+   - Multi-service orchestration: Control Plane API, Engine, Redis, PostgreSQL, Dashboard, LLM Worker, Prometheus, Grafana, and Mock Applications.
+2. **Comprehensive Observability**:
+   - Prometheus metrics across all stages: Ingestion rate, queue depths, evaluation durations (p50/p95/p99), containment dispatch latency, and agent health.
+   - Pre-configured Grafana dashboards for platform telemetry, incident metrics, and sensor status.
+3. **Multi-Dimensional Benchmark & Resilience Suite**:
+   - Data plane overhead measurement: Baseline vs. telemetry-enabled request latency (p50, p95, p99, p99.9).
+   - Ingestion throughput and queue saturation limits.
+   - Detection-to-containment latency measurements.
+   - Fault injection: Validating application continuity during injected outages of Control Plane, Redis, PostgreSQL, and LLM services.
+
+---
+
+## 5. Verification Plan
+
+### Automated Tests
+1. **Rust Engine & Correlator Unit Tests**:
+   - Entity canonicalization and session resolution tests.
+   - In-memory relationship graph edge insertion and TTL expiration tests.
+   - Policy allow/deny precedence tests (verifying DENY strictly overrides ALLOW).
+   - Capability state transition tests (`Granted` $\to$ `Revoked` $\to$ `Granted`).
+   - Ed25519 signature generation and verification tests.
+2. **Integration Test Suites**:
+   - `python tests/test_phase1_slice.py` (Phase 1 Ingestion & Emitter verification).
+   - `python tests/test_phase2_engine.py` (Phase 2 Hot State & Rule Engine verification).
+   - `python tests/test_phase3_correlation.py` (Phase 3 Multi-App attack chain correlation).
+   - `python tests/test_phase4_policy.py` (Phase 4 Capability policy and containment verification).
+3. **Benchmarking**:
+   - `python benchmarks/measure_overhead.py` to confirm application data plane overhead remains within SLO ($<150$ µs p99).
 
 ---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> **Key Architectural Alignments:**
-> 1. **Zero-Kernel-Code eBPF Strategy**: Rather than writing custom eBPF programs and dealing with kernel verifiers and cross-kernel portability, the platform will consume standardized telemetry from mature CNCF runtime engines (**Cilium Tetragon**, **Falco**, and **Cilium Hubble**), transforming them via Rust normalization adapters into our unified event model.
-> 2. **Dual-Tier State Model**: 
->    - **Hot State (Redis)**: Sub-millisecond sliding-window rate limiters, active session revocation blacklists, volatile tenant context, and pub/sub for real-time containment broadcast.
->    - **Persistent State (PostgreSQL)**: Durable event repository, structured incident lifecycle records, cryptographically verifiable audit logs, and versioned security policies.
-> 3. **Fail-Open Application Path with Fail-Closed Emergency Policies**: Protected applications run unaffected if the control plane degrades. However, locally cached containment policies (e.g., revoked JWTs or blocked CIDRs) remain actively enforced by local agents even during controller outages.
-> 4. **Air-Gapped / Off-Path AI Reasoning (Mode A vs Mode B)**: The system defaults to **Mode A** (100% deterministic, zero LLM dependency). When enabled, **Mode B** runs in an isolated Python background worker; its structured JSON recommendations *must* pass through deterministic Rust policy validation before any containment action is taken.
-
----
-
-## System Architecture
-
-```mermaid
-flowchart TD
-    subgraph DataPlane ["DATA PLANE (Heterogeneous Apps)"]
-        Client[Client Request] --> AppA[Application A]
-        Client --> AppB[Application B]
-        AppA --> AppAResp[Response < 2ms]
-        AppB --> AppBResp[Response < 2ms]
-        
-        AppA -.->|Non-blocking Async Emitter < 100µs| AgentA[Agent / Middleware]
-        AppB -.->|Non-blocking Async Emitter < 100µs| AgentB[Agent / Middleware]
-    end
-
-    subgraph KernelSensors ["KERNEL & RUNTIME TELEMETRY (eBPF)"]
-        Tetra[Cilium Tetragon<br/>Process / Exec / Sockets]
-        Falc[Falco<br/>Syscall Runtime Rules]
-        Cil[Cilium Hubble<br/>L3/L4/L7 Flow Logs]
-    end
-
-    subgraph ControlPlane ["SECURITY CONTROL PLANE (Rust Core)"]
-        Ingest[Ingestion & Normalizer Service<br/>Rust / Tokio / Axum]
-        Corr[Cross-App Correlation Engine<br/>Identity / IP / Session Graph]
-        Detect[Deterministic Detection Engine<br/>Sliding Windows & Rule AST]
-        Policy[Risk & Graduated Policy Engine<br/>Levels 0-6 Escalation]
-        Incident[Incident Lifecycle & Containment Manager]
-    end
-
-    subgraph Storage ["STATE ARCHITECTURE"]
-        Redis[(Redis<br/>Hot State / Sliding Windows / Blacklists)]
-        Postgres[(PostgreSQL<br/>Event Store / Incidents / Audits)]
-    end
-
-    subgraph OffPathAI ["OFF-PATH REASONING (Optional Mode B)"]
-        PyWorker[Python LLM Worker<br/>Async Ambiguity Resolver]
-        LLM[LLM Engine<br/>Local or Cloud API]
-    end
-
-    subgraph Presentation ["OPERATIONS & VISUALIZATION"]
-        Dash[Admin Dashboard<br/>React + TypeScript + Vite]
-        Prom[Prometheus Metrics]
-        Graf[Grafana Dashboards]
-    end
-
-    %% Wiring
-    AgentA -->|JSON / Protobuf Stream| Ingest
-    AgentB -->|JSON / Protobuf Stream| Ingest
-    Tetra -->|gRPC / JSON Feed| Ingest
-    Falc -->|JSON Stream / UDS| Ingest
-    Cil -->|Hubble Flows| Ingest
-
-    Ingest --> Redis
-    Ingest --> Postgres
-    Ingest --> Corr
-    Corr --> Detect
-    Detect --> Policy
-    Policy --> Incident
-
-    Incident -.->|Ambiguous Incident Context| PyWorker
-    PyWorker --> LLM
-    PyWorker -.->|Structured Recommendation JSON| Policy
-
-    Policy -->|Signed Containment Command| AgentA
-    Policy -->|Signed Containment Command| AgentB
-
-    Incident --> Dash
-    Ingest --> Prom
-    Prom --> Graf
-```
-
----
-
-## Phased Implementation Roadmap
-
-To deliver this massive platform reliably, the system is organized into **7 progressive, testable phases**. Each phase produces a working, verifiable milestone.
-
-```
-Phase 1: Architecture Core, Unified Schema & Telemetry Foundation
-   │
-Phase 2: Deterministic Detection Engine & Hot State Tracking
-   │
-Phase 3: Multi-Application Correlation Engine & Context Graph
-   │
-Phase 4: Containment Coordination & Graduated Response System
-   │
-Phase 5: Kernel Runtime Telemetry Integration (Tetragon, Falco, Cilium)
-   │
-Phase 6: Asynchronous Off-Path LLM Reasoning Service (Python Worker)
-   │
-Phase 7: Full Stack Observability, Benchmarking & Production Packaging
-```
-
----
-
-### Phase 1: Architecture Core, Unified Schema & Telemetry Foundation
-
-**Primary Objective**: Establish the project repository, standardized event format, zero-copy Rust ingestion pipeline, dual-tier state connection (Redis + Postgres), lightweight application middleware, and a real-time React + TypeScript dashboard skeleton.
-
-#### Core Deliverables:
-1. **Unified Security Event Schema (CloudEvents & ECS compatible)**:
-   - Event metadata: `event_id`, `timestamp_ns`, `app_id`, `env`, `event_type`.
-   - Actor context: `user_id`, `role`, `auth_method`, `session_id`, `client_fingerprint`.
-   - Source context: `ip_address`, `geo_country`, `user_agent`, `network_zone`.
-   - Action context: `method`, `route`, `status_code`, `duration_us`, `is_success`.
-   - Resource context: `resource_type`, `resource_id`, `sensitivity_tier`.
-   - Security metadata: `correlation_keys`, `risk_score`, `raw_evidence`.
-2. **Rust Control Plane Core (`crates/control-plane`)**:
-   - High-throughput asynchronous HTTP/WebSocket ingestion endpoint built with **Axum** + **Tokio**.
-   - Dual-sink dispatcher: Fast writes to Redis streams/buffers and batch bulk-insert to PostgreSQL.
-3. **Dual-Tier State Layer**:
-   - **PostgreSQL**: Normalized schema for `events`, `applications`, `incidents`, `audit_logs` with partitioning on `timestamp`.
-   - **Redis**: Connection pooling for ephemeral event queues, telemetry counters, and pub/sub channels.
-4. **Lightweight Application Middleware / Emitter**:
-   - Python / FastAPI and Node.js / Express reference middleware.
-   - Non-blocking asynchronous queueing via worker thread / background task with zero synchronous delay on HTTP requests (budget < 100 µs).
-5. **Dashboard Foundation (`frontend/`)**:
-   - React + TypeScript + Vite project with Tailwind CSS / glassmorphism dark-mode UI.
-   - Live streaming WebSocket connection to the Rust API showing real-time event throughput, application health, and incoming telemetry stream.
-
----
-
-### Phase 2: Deterministic Detection Engine & Hot State Tracking
-
-**Primary Objective**: Implement sub-millisecond, memory-resident rule evaluation and rate tracking in Rust and Redis to capture known suspicious activity before introducing complex models.
-
-#### Core Deliverables:
-1. **Sliding-Window Rate Trackers (Redis + Rust)**:
-   - High-performance sliding-log rate tracking using Redis sorted sets (`ZADD`, `ZREMRANGEBYSCORE`, `ZCARD`) or in-memory Rust ring buffers.
-   - Tracks metrics per actor, IP, and endpoint: request frequency, failed login density, 4xx/5xx burst rates.
-2. **Deterministic Rule Engine (`crates/detector`)**:
-   - Rule definition in YAML/JSON:
-     * *Brute-Force & Credential Stuffing*: > 10 failed logins in 120s from single IP or identity.
-     * *Mass Data Scraping / Sequential Enumeration*: > 50 distinct sequential resource queries (`/records/1`, `/records/2`) within 60s.
-     * *Privilege Creep*: Critical administrative endpoint accessed immediately following password reset or session change.
-     * *Geographical Velocity Anomaly*: Login from Country B within 15 minutes of an active session in Country A.
-3. **Signal Accumulation & Threat Scoring**:
-   - Transition events into weighted **Signals**, accumulating rolling risk points per entity.
-   - Dynamic decay mechanism for risk scores over time.
-
----
-
-### Phase 3: Multi-Application Correlation Engine & Context Graph
-
-**Primary Objective**: Break down application silos. Correlate disparate events across Application A, B, and C into cohesive, multi-stage attack chains.
-
-#### Core Deliverables:
-1. **Cross-Application Correlation Graph (`crates/correlator`)**:
-   - In-memory graph modeling relationships:
-     $$\text{Source IP} \longleftrightarrow \text{User Identity} \longleftrightarrow \text{Session ID} \longleftrightarrow \text{Application A/B/C}$$
-   - Correlates multi-application attack patterns:
-     * *Step 1*: Attacker probes `/api/v1/auth` on App A (triggers weak credential signal).
-     * *Step 2*: Uses valid stolen session token on App B to elevate role.
-     * *Step 3*: Triggers bulk data export on App C.
-2. **Unified Incident State Machine**:
-   - Incident states: `OBSERVE` $\to$ `DETECT` $\to$ `CORRELATE` $\to$ `ASSESS` $\to$ `CONTAIN` $\to$ `RECOVER`.
-   - Automatic aggregation of raw events into an `Incident Evidence Tree` with chronological timeline and affected entity list.
-3. **Incident Timeline Visualization**:
-   - React UI visual incident inspector: interactive node graph depicting actor movement across services, timestamps, and confidence score.
-
----
-
-### Phase 4: Containment Coordination & Graduated Response System
-
-**Primary Objective**: Rapidly enforce surgical countermeasures to halt threat spread while minimizing business disruption.
-
-#### Core Deliverables:
-1. **Graduated Response Hierarchy (Levels 0 to 6)**:
-   - **Level 0**: Normal logging / passive monitoring.
-   - **Level 1**: Elevated telemetry (increase sampling rate for entity).
-   - **Level 2**: Security warning / incident generation / admin notification.
-   - **Level 3**: Soft containment (force MFA challenge / throttle rate limit to 1 req/s).
-   - **Level 4**: Identity containment (instant session token invalidation / user account locked).
-   - **Level 5**: Network / host containment (IP drop / egress block on perimeter).
-   - **Level 6**: Emergency service quarantine (service placed in read-only / maintenance mode).
-2. **Cryptographically Secure Control Channel**:
-   - Control commands generated with Ed25519 signatures, timestamp nonce, explicit TTL (e.g. 300s expiration), and unique `command_id`.
-   - Agents verify signature before executing revocation, mitigating rogue command injection.
-3. **Active Session Blacklist Cache**:
-   - Instant revocation broadcast via Redis Pub/Sub to all connected agents.
-   - Local agents maintain an in-memory TTL Bloom filter / hash set for instant $O(1)$ rejection of revoked tokens.
-4. **Dashboard Response Console**:
-   - Operator "One-Click Containment" button: Revoke session, ban IP, isolate user, or revert containment action with full audit recording.
-
----
-
-### Phase 5: Kernel & Runtime Telemetry Integration (Tetragon, Falco, Cilium)
-
-**Primary Objective**: Ingest kernel-level and container-level telemetry from existing CNCF tools without writing custom eBPF programs, tying kernel syscalls to application-layer identities.
-
-#### Core Deliverables:
-1. **Sensor Ingestion Adapters (`crates/sensors`)**:
-   - **Cilium Tetragon Adapter**:
-     * Ingests Tetragon JSON/gRPC stream (`process_exec`, `process_exit`, `process_kprobe` for system calls, socket connects, namespace escapes).
-     * Detects container escapes, unauthorized binary execution (e.g. `curl`, `wget`, `sh` in a web container), and sensitive file access (`/etc/shadow`, Kubernetes service account tokens).
-   - **Falco Adapter**:
-     * Consumes Falco alerts via JSON output (over Unix Domain Socket or HTTP POST).
-     * Maps Falco rules (e.g., "Terminal shell in container", "Read sensitive file untrusted") into platform event signals.
-   - **Cilium Hubble Adapter**:
-     * Ingests network flow logs: L3/L4 connections, L7 DNS and HTTP drops, unapproved cross-pod lateral movement.
-2. **Kernel-to-Application Correlation Linkage**:
-   - Uses host metadata, container ID, PID, and request timestamps to connect low-level eBPF events (e.g., `wget` spawned inside container) with the application HTTP request that initiated it.
-
----
-
-### Phase 6: Asynchronous Off-Path LLM Reasoning Service (Python Worker)
-
-**Primary Objective**: Provide an optional, intelligent investigation assistant for ambiguous, multi-vector incidents without placing any LLM calls on the critical request path.
-
-#### Core Deliverables:
-1. **Separation of Modes**:
-   - **Mode A (Default - Deterministic)**: 100% operational with LLM turned completely OFF. Zero model latency, zero token cost.
-   - **Mode B (Intelligent Assistance)**: Triggered only when rule engines classify an incident as `AMBIGUOUS_HIGH_RISK` or by explicit analyst request.
-2. **Python Worker Service (`services/llm-worker`)**:
-   - Fast, asynchronous Python service (FastAPI + AsyncIO) listening to an incident review queue in Redis.
-   - Aggregates the Incident Context: normalized timeline, affected assets, past actor baselines, triggered rules.
-3. **Constrained Structured Output Schema**:
-   - Enforces strict JSON output via Pydantic / JsonSchema:
-     ```json
-     {
-       "analysis": "Chronological assessment of lateral movement...",
-       "threat_classification": "CREDENTIAL_COMPROMISE_WITH_LATERAL_RECON",
-       "confidence_score": 0.88,
-       "recommended_response_level": 4,
-       "recommended_actions": ["REVOKE_SESSION", "NOTIFY_SOC_TIER_2"],
-       "explanation": "Observed failed logins followed by privilege change and unexpected shell execution via Tetragon telemetry."
-     }
-     ```
-4. **Deterministic Policy Validation Gate**:
-   - The LLM **never** directly initiates commands.
-   - The Rust Policy Engine inspects the recommendation, checks organizational guardrails, and requires automated or human operator approval before execution.
-
----
-
-### Phase 7: Full Stack Observability, Benchmarking & Production Packaging
-
-**Primary Objective**: Package the system into a repeatable Docker Compose environment with end-to-end metrics, Grafana dashboards, and high-load microsecond latency benchmarks.
-
-#### Core Deliverables:
-1. **Full-Stack Docker Deployment (`deploy/docker-compose.yml`)**:
-   - Orchestrated containers:
-     * `control-plane-api` & `engine` (Rust)
-     * `redis` (Hot state / pub-sub)
-     * `postgres` (Persistent event & audit store)
-     * `dashboard` (React + TypeScript web app)
-     * `llm-worker` (Python AI assistant)
-     * `prometheus` & `grafana`
-     * `mock-apps` (FastAPI / Node web applications emitting live traffic)
-     * `sensor-simulator` (Replaying Tetragon, Falco, and Cilium telemetry)
-2. **Observability Infrastructure**:
-   - Rust Prometheus exporter emitting:
-     * `ingestion_events_total`, `ingestion_latency_microseconds` (p50, p95, p99)
-     * `correlation_graph_nodes_total`, `detection_eval_duration_us`
-     * `containment_dispatch_duration_ms`
-     * `agent_backpressure_queue_depth`
-   - Pre-provisioned Grafana dashboards for Control Plane Performance, Threat Trends, and System Health.
-3. **Benchmarking & Latency Verification Harness**:
-   - Load testing scripts (k6 / Rust wrk client) to prove:
-     * App synchronous overhead < 150 µs.
-     * Ingestion throughput > 50,000 events/second per core.
-     * End-to-end detection-to-containment latency < 500 ms.
-
----
-
-## Directory Structure
-
-```text
-d:\AcademicPlanning\SecuritySystem\
-├── crates/
-│   ├── control-plane/             # Rust API server, Axum HTTP/WS endpoints
-│   ├── engine/                    # Detection rules, sliding windows, risk engine
-│   ├── correlator/                # Cross-app graph correlation engine
-│   ├── sensors/                   # Tetragon, Falco, and Cilium Hubble parsers
-│   ├── common/                    # Unified event schema, types, crypto signing
-│   └── agent-sdk/                 # Rust agent/middleware client library
-├── frontend/                      # React + TypeScript + Vite + Tailwind Admin UI
-│   ├── src/
-│   │   ├── components/            # Live telemetry feed, incident graph, containment modal
-│   │   ├── pages/                 # Overview, Incidents, Applications, Policies, Settings
-│   │   └── services/              # WebSocket client, API client
-│   └── package.json
-├── services/
-│   ├── llm-worker/                # Python async service for Mode B incident reasoning
-│   │   ├── app/
-│   │   │   ├── prompts/           # Guardrailed incident reasoning prompts
-│   │   │   ├── schemas/           # Pydantic structured output models
-│   │   │   └── worker.py          # Redis queue consumer
-│   │   └── requirements.txt
-│   └── mock-apps/                 # Sample apps (FastAPI, Node.js) with security SDK
-├── deploy/
-│   ├── docker-compose.yml         # Full multi-container composition
-│   ├── postgres/                  # Init schema, partition DDL, indexes
-│   ├── prometheus/                # Prometheus scraper configuration
-│   └── grafana/                   # Pre-configured security dashboards
-├── benchmarks/                    # k6 / Python latency test harness & simulators
-└── docs/                          # Architecture guides and runbooks
-```
-
----
-
-## Verification & Testing Plan
-
-### Automated Testing
-1. **Rust Unit & Integration Tests**:
-   - `cargo test --workspace`:
-     * Event serialization / deserialization roundtrip.
-     * Sliding-window rate calculation accuracy under high concurrency.
-     * Rule matching engine edge cases (bursts, exact thresholds).
-     * Ed25519 signature generation and replay verification.
-2. **Python LLM Worker Schema Validation**:
-   - `pytest services/llm-worker`: verify strict JSON parsing, fallback logic when model is unresponsive.
-3. **Frontend Component Tests**:
-   - `npm run test` / `npm run build`: Type-checking and bundle compilation.
-
-### Live System & Latency Verification
-1. **Synchronous Impact Measurement**:
-   - Run benchmark against mock application: Baseline latency vs. Emitter-enabled latency.
-   - Target: Synchronous overhead added by telemetry emitter $\le 150 \ \mu\text{s}$.
-2. **End-to-End Incident Containment Test**:
-   - Trigger automated attack script:
-     * App A: 12 failed logins in 5 seconds.
-     * App A: 1 successful login.
-     * App B: Immediate access to sensitive endpoint.
-     * Sensor: Tetragon reports unauthorized execution inside App B.
-   - Verify:
-     * Rust engine detects correlated chain.
-     * Incident generated with calculated risk $> \text{threshold}$.
-     * Signed revocation command sent to App A & B agents.
-     * App A & B immediately reject subsequent requests for that session.
-     * Total elapsed time from final event to containment execution $\le 500 \ \text{ms}$.
+> **Phase Alignment & Architectural Approval:**
+> - Phases 1 and 2 are fully completed, verified, and passing all unit and end-to-end integration tests.
+> - Phase 3 is planned as the next immediate implementation milestone: focusing on **Identity Resolution, Cross-App In-Memory Correlation Graph, and Capability Context**.
+> - Phase 4 directly introduces the **Deno-Inspired Capability Policy Engine** (scoped permissions, explicit allow/deny with DENY precedence, runtime permission state transitions, explainable decision audit trails, and policy simulation).
+> 
+> Please review this updated implementation plan. Once approved, we will begin Phase 3 implementation.

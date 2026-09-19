@@ -1690,6 +1690,7 @@ dependencies = [
  "redis",
  "reqwest",
  "security-control-plane-common",
+ "security-control-plane-correlator",
  "security-control-plane-engine",
  "serde",
  "serde_json",
@@ -1728,6 +1729,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "security-control-plane-correlator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "security-control-plane-common",
+ "security-control-plane-engine",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

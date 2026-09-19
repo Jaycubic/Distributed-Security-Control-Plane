@@ -1,6 +1,6 @@
 # Distributed Security Control Plane
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust: 1.80+](https://img.shields.io/badge/Rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
 [![React: 18.3](https://img.shields.io/badge/Frontend-React_%2B_TypeScript-61dafb.svg)](https://react.dev/)
 [![Architecture: Out--of--Band](https://img.shields.io/badge/Architecture-Out--of--Band_Control_Plane-emerald.svg)](#core-architectural-invariant)
@@ -189,9 +189,13 @@ The platform is designed to be built incrementally through vertical slices:
   - Signal accumulation, dynamic risk scoring (Medium/High/Critical), automated Incident synthesis, and lifecycle state management.
   - RESTful Incident Management endpoints (`GET /api/v1/incidents`, `POST /api/v1/incidents/:id/status`) and real-time WebSocket incident streaming.
   - Operations Dashboard Incidents & Containment Console with one-click containment and attack simulation dispatchers.
-- [ ] **Phase 3: Identity Resolution & Multi-Application Correlation Engine**
-  - Canonical entity resolution (IP $\to$ Session $\to$ User $\to$ Container PID).
-  - In-memory relationship graph tracking attack chains across Application A, B, and C.
+- [x] **Phase 3: Identity Resolution, Cross-App Correlation & Capability Context**
+  - Canonical entity resolution across heterogeneous identifiers (IP, session token, user ID, container ID, PID).
+  - High-performance In-Memory Context Graph (`MemoryContextGraph`) tracking relationships across Application A, B, and C with automated TTL eviction.
+  - Multi-stage cross-application attack sequence detector (Reconnaissance $\to$ Lateral Movement $\to$ High-Impact Exfiltration).
+  - Deno-inspired capability context inference (`database.read`, `process.execute`, `data.export`, `admin.operation`).
+  - RESTful entity and topology endpoints (`GET /api/v1/entities`, `GET /api/v1/correlation/graph`).
+  - Frontend Identity & Correlation Console with graph topology inspection and 3-App attack chain simulation.
 - [ ] **Phase 4: Graduated Containment System, Signed Commands & Reversible TTLs**
   - Capability-based actions: `REVOKE_SESSION`, `THROTTLE_ACTOR`, `BLOCK_NETWORK`, `ISOLATE_SERVICE`.
   - Ed25519 signed control channel with mandatory TTLs and automated rollback.
@@ -243,10 +247,18 @@ cargo test -p security-control-plane-engine
 
 # Phase 2 End-to-End Detection & Containment Suite
 python tests/test_phase2_engine.py
+
+# Phase 3 Rust Correlator Unit Tests
+cargo test -p security-control-plane-correlator
+
+# Phase 3 Cross-Application Correlation & Identity Test Suite
+python tests/test_phase3_correlation.py
 ```
 
 ---
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. See the [LICENSE](LICENSE) file for full terms.
+
+The AGPL ensures that all modifications — including those deployed as a network service — remain open source and available to the community. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [SECURITY.md](SECURITY.md) for our vulnerability disclosure policy.
