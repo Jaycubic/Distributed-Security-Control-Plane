@@ -64,3 +64,30 @@ export interface ControlPlaneMetricsData {
   eventsPerSecond: number;
   connected: boolean;
 }
+
+export type IncidentStatus = 'open' | 'investigating' | 'contained' | 'resolved' | 'false_positive';
+
+export interface SecuritySignal {
+  signal_id: string;
+  rule_name: string;
+  severity: Severity;
+  description: string;
+  risk_weight: number;
+  timestamp: string;
+  matched_event_ids: string[];
+}
+
+export interface Incident {
+  incident_id: string;
+  title: string;
+  description: string;
+  severity: Severity;
+  status: IncidentStatus;
+  target_entity: string;
+  app_id: string;
+  risk_score: number;
+  signals: SecuritySignal[];
+  evidence: SecurityEvent[];
+  created_at: string;
+  updated_at: string;
+}

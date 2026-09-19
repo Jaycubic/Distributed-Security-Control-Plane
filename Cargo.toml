@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "crates/common",
     "crates/control-plane",
-    "crates/agent-sdk"
+    "crates/agent-sdk",
+    "crates/engine"
 ]
 
 [workspace.dependencies]

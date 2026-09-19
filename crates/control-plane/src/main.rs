@@ -1,20 +1,21 @@
 use security_control_plane::{create_router, AppState, MemoryDurableSink, MemoryEventStream};
+use security_control_plane_engine::{HotStateStore, MemoryHotState, RedisHotState, RuleEngine};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "security_control_plane=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "security_control_plane=debug,security_control_plane_engine=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting Distributed Security Control Plane (Phase 1 Slice)");
+    info!("Starting Distributed Security Control Plane (Phase 2 - Hot State & Deterministic Detection)");
 
     // Initialize decoupled Event Stream
     let stream = Arc::new(MemoryEventStream::new(50_000));
@@ -22,9 +23,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Selective Durable Sink
     let durable_sink = Arc::new(MemoryDurableSink::new());
 
+    // Initialize Hot State & Deterministic Rule Engine
+    let hot_state: Arc<dyn HotStateStore> = match std::env::var("REDIS_URL") {
+        Ok(url) if !url.is_empty() => {
+            info!("Connecting to Redis Hot State store at {}", url);
+            Arc::new(RedisHotState::new(&url)?)
+        }
+        _ => {
+            info!("Initializing in-memory sub-microsecond Hot State store");
+            Arc::new(MemoryHotState::new())
+        }
+    };
+    let engine = Arc::new(RuleEngine::with_default_rules(hot_state));
+
+    // Spawn out-of-band asynchronous detection engine worker
+    let engine_worker = Arc::clone(&engine);
+    let mut detection_rx = stream.subscribe();
+    tokio::spawn(async move {
+        info!("Deterministic Detection Engine worker started (out-of-band streaming)");
+        while let Ok(event) = detection_rx.recv().await {
+            if let Err(err) = engine_worker.evaluate_event(&event).await {
+                tracing::error!(error = %err, "Detection engine event evaluation error");
+            }
+        }
+    });
+
     let state = AppState {
         stream,
         durable_sink,
+        engine,
     };
 
     let app = create_router(state);
@@ -36,7 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     info!("Security Control Plane Ingestion & Stream API listening on http://{}", addr);
-    info!("WebSocket live feed available at ws://{}/api/v1/ws/events", addr);
+    info!("WebSocket live feed (events + incidents) at ws://{}/api/v1/ws/events", addr);
+    info!("Incidents REST API at http://{}/api/v1/incidents", addr);
     info!("Prometheus metrics available at http://{}/api/v1/metrics", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

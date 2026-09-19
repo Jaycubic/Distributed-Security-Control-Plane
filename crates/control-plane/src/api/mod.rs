@@ -4,7 +4,7 @@ use crate::stream::{EventStreamProducer, MemoryEventStream};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Path, Query, State,
     },
     http::StatusCode,
     response::{IntoResponse, Json},
@@ -13,15 +13,18 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use security_control_plane_common::{validate_security_event, SecurityEvent};
+use security_control_plane_engine::{IncidentStatus, RuleEngine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
     pub stream: Arc<MemoryEventStream>,
     pub durable_sink: Arc<dyn DurableEventSink>,
+    pub engine: Arc<RuleEngine>,
 }
 
 #[derive(Serialize)]
@@ -43,12 +46,25 @@ pub enum IngestionPayload {
     Batch(Vec<SecurityEvent>),
 }
 
+#[derive(Deserialize)]
+pub struct IncidentsQuery {
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateIncidentStatusRequest {
+    pub status: String,
+}
+
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/telemetry", post(handle_telemetry))
         .route("/api/v1/health", get(handle_health))
         .route("/api/v1/metrics", get(handle_metrics))
         .route("/api/v1/events/recent", get(handle_recent_events))
+        .route("/api/v1/incidents", get(handle_get_incidents))
+        .route("/api/v1/incidents/:id", get(handle_get_incident_by_id))
+        .route("/api/v1/incidents/:id/status", post(handle_update_incident_status))
         .route("/api/v1/ws/events", get(handle_ws_events))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -75,6 +91,74 @@ async fn handle_recent_events(State(state): State<AppState>) -> impl IntoRespons
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+async fn handle_get_incidents(
+    State(state): State<AppState>,
+    Query(query): Query<IncidentsQuery>,
+) -> impl IntoResponse {
+    let incidents = if let Some(ref s) = query.status {
+        if s == "open" || s == "active" {
+            state.engine.get_active_incidents().await
+        } else {
+            state.engine.get_all_incidents().await
+        }
+    } else {
+        state.engine.get_all_incidents().await
+    };
+
+    (StatusCode::OK, Json(serde_json::json!(incidents)))
+}
+
+async fn handle_get_incident_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if let Some(inc) = state.engine.get_incident_by_id(id).await {
+        (StatusCode::OK, Json(serde_json::json!(inc))).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Incident {} not found", id) })),
+        )
+            .into_response()
+    }
+}
+
+async fn handle_update_incident_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateIncidentStatusRequest>,
+) -> impl IntoResponse {
+    let status = match payload.status.to_lowercase().as_str() {
+        "open" => IncidentStatus::Open,
+        "investigating" => IncidentStatus::Investigating,
+        "contained" => IncidentStatus::Contained,
+        "resolved" => IncidentStatus::Resolved,
+        "false_positive" => IncidentStatus::FalsePositive,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("Invalid status '{}'", other) })),
+            )
+                .into_response();
+        }
+    };
+
+    let updated = state.engine.update_incident_status(id, status).await;
+    if updated {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "updated", "incident_id": id })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Incident {} not found", id) })),
+        )
+            .into_response()
     }
 }
 
@@ -115,7 +199,7 @@ async fn handle_telemetry(
     match state.stream.publish_batch(&valid_events).await {
         Ok(ids) => {
             metrics.events_ingested.inc_by(ids.len() as f64);
-            
+
             // Asynchronously dispatch to the selective durable sink
             let sink = Arc::clone(&state.durable_sink);
             let events_to_persist = valid_events;
@@ -163,9 +247,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("Dashboard client connected to telemetry WebSocket stream");
 
     let (mut sender, mut receiver) = socket.split();
-    let mut rx = state.stream.subscribe();
+    let mut rx_events = state.stream.subscribe();
+    let mut rx_incidents = state.engine.subscribe_incidents();
 
-    // Spawn task to read client incoming pings or messages
+    // Spawn task to read client incoming pings or close messages
     let mut read_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Close(_) = msg {
@@ -174,13 +259,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Stream live events from the Event Stream to the WebSocket client
+    // Stream live events and incident notifications over the WebSocket
     let mut write_task = tokio::spawn(async move {
-        while let Ok(event) = rx.recv().await {
-            if let Ok(json_str) = serde_json::to_string(&event) {
-                if sender.send(Message::Text(json_str)).await.is_err() {
-                    break;
+        loop {
+            tokio::select! {
+                Ok(event) = rx_events.recv() => {
+                    if let Ok(json_str) = serde_json::to_string(&event) {
+                        if sender.send(Message::Text(json_str)).await.is_err() {
+                            break;
+                        }
+                    }
                 }
+                Ok(incident) = rx_incidents.recv() => {
+                    if let Ok(json_str) = serde_json::to_string(&incident) {
+                        if sender.send(Message::Text(json_str)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                else => break,
             }
         }
     });

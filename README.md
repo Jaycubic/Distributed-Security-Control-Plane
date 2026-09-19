@@ -183,10 +183,12 @@ The platform is designed to be built incrementally through vertical slices:
   - Decoupled Event Stream abstraction & selective durable writer.
   - Non-blocking Python and Node application middleware.
   - Live streaming React + TypeScript dashboard with WebSocket connectivity.
-- [ ] **Phase 2: Hot State Operational Engine & Deterministic Detection**
-  - Redis sliding-window frequency and burst counters.
-  - High-confidence deterministic rules (credential stuffing, rapid API enumeration, mass exports).
-  - Signal accumulation and baseline Incident generation.
+- [x] **Phase 2: Hot State Operational Engine & Deterministic Detection**
+  - Dual-tier hot state storage (`HotStateStore` with Redis sorted sets and zero-dependency in-memory sliding ring-buffer).
+  - High-confidence deterministic rules (Credential Brute-Force, Rapid API Enumeration, Unauthorized Bursts, Tetragon Container Kernel Shells).
+  - Signal accumulation, dynamic risk scoring (Medium/High/Critical), automated Incident synthesis, and lifecycle state management.
+  - RESTful Incident Management endpoints (`GET /api/v1/incidents`, `POST /api/v1/incidents/:id/status`) and real-time WebSocket incident streaming.
+  - Operations Dashboard Incidents & Containment Console with one-click containment and attack simulation dispatchers.
 - [ ] **Phase 3: Identity Resolution & Multi-Application Correlation Engine**
   - Canonical entity resolution (IP $\to$ Session $\to$ User $\to$ Container PID).
   - In-memory relationship graph tracking attack chains across Application A, B, and C.
@@ -233,7 +235,14 @@ python benchmarks/measure_overhead.py
 
 ### 5. Run the Integration Tests
 ```powershell
+# Phase 1 Slice Verification
 python tests/test_phase1_slice.py
+
+# Phase 2 Rust Engine Tests
+cargo test -p security-control-plane-engine
+
+# Phase 2 End-to-End Detection & Containment Suite
+python tests/test_phase2_engine.py
 ```
 
 ---
