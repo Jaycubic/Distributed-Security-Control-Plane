@@ -256,6 +256,33 @@ The platform is designed to be built incrementally through vertical slices:
 
 ## Quickstart & Local Setup
 
+### Prerequisites
+
+- **Rust 1.80+**, **Node.js 18+**, **Docker** (for Redis & PostgreSQL)
+
+### Local Development Setup
+
+```bash
+# 1. Start state services
+docker run -d --name redis -p 6379:6379 redis:7
+docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=dev postgres:16
+
+# 2. Build and run the control plane
+cargo build && cargo run
+
+# 3. Start the frontend
+cd frontend && npm install && npm run dev
+
+# 4. Run tests
+cargo test && python tests/test_phase3_correlation.py
+```
+
+### Troubleshooting
+
+- **Port conflicts:** Ensure 6379, 5432, 3000 are free (`lsof -i :<port>`).
+- **DB connection errors:** Verify PostgreSQL is running and `DATABASE_URL` is set in `.env`.
+- **Frontend won't start:** Delete `node_modules` and re-run `npm install`.
+
 ### 1. Prerequisites
 - **Rust**: 1.80+ (`stable` toolchain)
 - **Node.js**: 20+ and npm
