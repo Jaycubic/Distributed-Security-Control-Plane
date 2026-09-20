@@ -5,7 +5,8 @@ members = [
     "crates/control-plane",
     "crates/agent-sdk",
     "crates/engine",
-    "crates/correlator"
+    "crates/correlator",
+    "crates/sensors"
 ]
 
 [workspace.dependencies]

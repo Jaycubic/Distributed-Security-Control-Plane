@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting Distributed Security Control Plane (Phase 4 - Capability Policy Engine & Graduated Containment)");
+    info!("Starting Distributed Security Control Plane (Phase 5 - Kernel & Runtime Telemetry Adapters: Tetragon, Falco, Hubble)");
 
     // Initialize decoupled Event Stream
     let stream = Arc::new(MemoryEventStream::new(50_000));
@@ -115,6 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Correlation Context Graph at http://{}/api/v1/correlation/graph", addr);
     info!("Capability Policies API at http://{}/api/v1/policies", addr);
     info!("Graduated Containment API at http://{}/api/v1/containment/commands", addr);
+    info!("Kernel Telemetry (Cilium Tetragon) at http://{}/api/v1/sensors/tetragon", addr);
+    info!("Runtime Telemetry (Falco Syscalls) at http://{}/api/v1/sensors/falco", addr);
+    info!("Network Telemetry (Cilium Hubble Flows) at http://{}/api/v1/sensors/hubble", addr);
     info!("Prometheus metrics available at http://{}/api/v1/metrics", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

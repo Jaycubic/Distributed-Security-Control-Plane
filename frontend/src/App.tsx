@@ -256,7 +256,7 @@ export const App: React.FC = () => {
   };
 
   // Simulate generating sample events via the ingestion API
-  const handleSimulateAttack = async (scenario: 'bruteforce' | 'recon' | 'kernel_shell' | 'multi_app_attack') => {
+  const handleSimulateAttack = async (scenario: 'bruteforce' | 'recon' | 'kernel_shell' | 'multi_app_attack' | 'tetragon_shell' | 'falco_alert' | 'hubble_drop') => {
     if (scenario === 'multi_app_attack') {
       const attackerIp = `198.51.100.${Math.floor(Math.random() * 150 + 20)}`;
       const attackerSession = `sess_${Math.random().toString(36).substring(7)}`;
@@ -374,6 +374,113 @@ export const App: React.FC = () => {
       } catch (e) {
         console.error(e);
       }
+    } else if (scenario === 'tetragon_shell') {
+      const payload = {
+        process_exec: {
+          process: {
+            exec_id: `tetra_${Math.random().toString(36).substring(7)}`,
+            pid: 14092,
+            uid: 0,
+            binary: '/bin/sh',
+            arguments: '-i',
+            pod: {
+              namespace: 'production',
+              name: 'billing-service-7b5f94-kx89p',
+              container: {
+                id: 'docker://e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+                name: 'billing-app'
+              }
+            }
+          },
+          parent: {
+            pid: 14001,
+            binary: '/usr/local/bin/node'
+          }
+        },
+        node_name: 'k8s-worker-node-03',
+        time: new Date().toISOString()
+      };
+      try {
+        await fetch('http://localhost:8080/api/v1/sensors/tetragon', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        setActiveTab('telemetry');
+      } catch (e) {
+        console.error(e);
+      }
+    } else if (scenario === 'falco_alert') {
+      const payload = {
+        output: '13:42:01.123456789: Critical A shell was spawned in a container with an attached terminal (user=root container_id=e3b0c44298fc shell=/bin/sh parent=node cmdline=sh -i)',
+        priority: 'Critical',
+        rule: 'Terminal shell in container',
+        time: new Date().toISOString(),
+        output_fields: {
+          'container.id': 'e3b0c44298fc',
+          'container.name': 'billing-app',
+          'k8s.pod.name': 'billing-service-7b5f94-kx89p',
+          'k8s.ns.name': 'production',
+          'proc.name': 'sh',
+          'proc.pname': 'node',
+          'proc.pid': 14092,
+          'user.name': 'root',
+          'fd.name': null
+        }
+      };
+      try {
+        await fetch('http://localhost:8080/api/v1/sensors/falco', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        setActiveTab('telemetry');
+      } catch (e) {
+        console.error(e);
+      }
+    } else if (scenario === 'hubble_drop') {
+      const payload = {
+        flow: {
+          time: new Date().toISOString(),
+          verdict: 'DROPPED',
+          drop_reason_desc: 'POLICY_DENIED',
+          traffic_direction: 'EGRESS',
+          IP: {
+            source: '10.244.1.45',
+            destination: '198.51.100.99',
+            ipVersion: 'IPv4'
+          },
+          l4: {
+            TCP: {
+              source_port: 44128,
+              destination_port: 4444
+            }
+          },
+          source: {
+            identity: 1042,
+            namespace: 'production',
+            labels: ['app=billing-service', 'env=production'],
+            pod_name: 'billing-service-7b5f94-kx89p'
+          },
+          destination: {
+            identity: 2,
+            labels: ['reserved:world']
+          },
+          summary: 'TCP Flags: SYN; Drop Reason: Policy denied egress'
+        },
+        node_name: 'k8s-worker-node-03',
+        time: new Date().toISOString()
+      };
+      try {
+        await fetch('http://localhost:8080/api/v1/sensors/hubble', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        setActiveTab('telemetry');
+      } catch (e) {
+        console.error(e);
+      }
     } else {
       const payload = {
         event_id: crypto.randomUUID(),
@@ -445,7 +552,7 @@ export const App: React.FC = () => {
               Distributed Security Control Plane
             </h1>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '4px 0 0 0' }}>
-              Phase 3: Identity Resolution, In-Memory Context Graph & Cross-App Correlation
+              Phase 5: Kernel &amp; Runtime Telemetry Adapters (Cilium Tetragon, Falco, Hubble) | Deno Capabilities &amp; Signed Containment
             </p>
           </div>
         </div>
@@ -752,6 +859,48 @@ export const App: React.FC = () => {
           >
             <Share2 size={13} /> ⚡ 3-App Attack Chain
           </button>
+
+          <button
+            id="btn-sim-tetragon"
+            onClick={() => handleSimulateAttack('tetragon_shell')}
+            style={{
+              background: 'rgba(139, 92, 246, 0.18)',
+              border: '1px solid rgba(139, 92, 246, 0.5)',
+              color: '#c084fc',
+              padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
+              fontSize: '0.78rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6
+            }}
+          >
+            ⚡ Tetragon /bin/sh
+          </button>
+
+          <button
+            id="btn-sim-falco"
+            onClick={() => handleSimulateAttack('falco_alert')}
+            style={{
+              background: 'rgba(16, 185, 129, 0.18)',
+              border: '1px solid rgba(16, 185, 129, 0.5)',
+              color: '#34d399',
+              padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
+              fontSize: '0.78rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6
+            }}
+          >
+            🛡️ Falco Alert
+          </button>
+
+          <button
+            id="btn-sim-hubble"
+            onClick={() => handleSimulateAttack('hubble_drop')}
+            style={{
+              background: 'rgba(249, 115, 22, 0.18)',
+              border: '1px solid rgba(249, 115, 22, 0.5)',
+              color: '#fb923c',
+              padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
+              fontSize: '0.78rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6
+            }}
+          >
+            🌐 Hubble Drop
+          </button>
         </div>
       </div>
 
@@ -897,9 +1046,27 @@ export const App: React.FC = () => {
                     <span style={{ fontFamily: 'var(--font-mono)' }}>{selectedEvent.source.sensor.raw_event_type}</span>
                   </div>
                   {selectedEvent.source.process_name && (
-                    <div style={{ fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between' }}>
+                    <div style={{ fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                       <span style={{ color: 'var(--text-muted)' }}>Process:</span>
                       <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-rose)' }}>{selectedEvent.source.process_name}</span>
+                    </div>
+                  )}
+                  {selectedEvent.source.container_id && (
+                    <div style={{ fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Container:</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>{selectedEvent.source.container_id}</span>
+                    </div>
+                  )}
+                  {selectedEvent.source.pid && (
+                    <div style={{ fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>PID:</span>
+                      <span style={{ fontFamily: 'var(--font-mono)' }}>{selectedEvent.source.pid}</span>
+                    </div>
+                  )}
+                  {selectedEvent.source.sensor.sensor_id && (
+                    <div style={{ fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Sensor ID / Node:</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-emerald)' }}>{selectedEvent.source.sensor.sensor_id}</span>
                     </div>
                   )}
                 </div>

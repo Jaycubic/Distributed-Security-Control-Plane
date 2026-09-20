@@ -1760,6 +1760,7 @@ dependencies = [
  "security-control-plane-common",
  "security-control-plane-correlator",
  "security-control-plane-engine",
+ "security-control-plane-sensors",
  "serde",
  "serde_json",
  "sqlx",
@@ -1832,6 +1833,19 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "security-control-plane-sensors"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "security-control-plane-common",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "tracing",
  "uuid",
 ]

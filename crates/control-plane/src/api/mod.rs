@@ -26,6 +26,9 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+mod sensors;
+use sensors::{handle_falco_ingest, handle_hubble_ingest, handle_tetragon_ingest};
+
 #[derive(Clone)]
 pub struct AppState {
     pub stream: Arc<MemoryEventStream>,
@@ -104,7 +107,7 @@ pub struct RollbackContainmentRequest {
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         // Telemetry & Metrics
-        .route("/api/v1/telemetry", post(handle_telemetry))
+        .route("/api/v1/telemetry", get(handle_recent_events).post(handle_telemetry))
         .route("/api/v1/health", get(handle_health))
         .route("/api/v1/metrics", get(handle_metrics))
         .route("/api/v1/events/recent", get(handle_recent_events))
@@ -126,6 +129,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/containment/dispatch", post(handle_dispatch_containment))
         .route("/api/v1/containment/:id/rollback", post(handle_rollback_containment))
         .route("/api/v1/containment/public-key", get(handle_get_containment_public_key))
+        // Phase 5: Kernel & Runtime Sensor Telemetry
+        .route("/api/v1/sensors/tetragon", post(handle_tetragon_ingest))
+        .route("/api/v1/sensors/falco", post(handle_falco_ingest))
+        .route("/api/v1/sensors/hubble", post(handle_hubble_ingest))
         // WebSocket Real-time Stream
         .route("/api/v1/ws/events", get(handle_ws_events))
         .layer(CorsLayer::permissive())
@@ -138,7 +145,7 @@ async fn handle_health() -> impl IntoResponse {
         "service": "security-control-plane",
         "version": "0.1.0",
         "mode": "Mode A (Deterministic)",
-        "phase": "Phase 4 - Capability Policy Engine & Graduated Containment",
+        "phase": "Phase 5 - Kernel & Runtime Telemetry Adapters (Tetragon, Falco, Hubble)",
     }))
 }
 
@@ -147,14 +154,8 @@ async fn handle_metrics() -> impl IntoResponse {
 }
 
 async fn handle_recent_events(State(state): State<AppState>) -> impl IntoResponse {
-    match state.durable_sink.get_recent_events(50).await {
-        Ok(events) => (StatusCode::OK, Json(serde_json::json!(events))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+    let events = state.stream.get_recent(50).await;
+    (StatusCode::OK, Json(serde_json::json!(events))).into_response()
 }
 
 async fn handle_get_incidents(

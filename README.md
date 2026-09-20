@@ -45,9 +45,9 @@ SECURITY CONTROL PLANE
 
 The repository is under active development and is organized as a phased security-engineering project.
 
-**Implemented:** Phase 1 architecture/ingestion/observable slice, Phase 2 deterministic detection and incidents, and Phase 3 identity resolution, cross-application correlation, and capability context.
+**Implemented:** Phase 1 architecture/ingestion/observable slice, Phase 2 deterministic detection and incidents, Phase 3 identity resolution & cross-app correlation, Phase 4 capability policy engine & signed containment, and Phase 5 kernel & runtime telemetry adapters (Cilium Tetragon, Falco, Hubble).
 
-**Planned:** graduated containment, direct runtime telemetry adapters, optional off-path advisory AI, and full observability/packaging.
+**Planned:** Phase 6 advisory off-path AI reasoning worker and Phase 7 full stack observability & packaging.
 
 This is an evolving engineering project; APIs, internal interfaces, and deployment assumptions may change as additional phases are implemented.
 
@@ -248,9 +248,11 @@ The platform is designed to be built incrementally through vertical slices:
   - Automated TTL expiration sweeper and explicit operator reversibility (`POST /api/v1/containment/:id/rollback`).
   - Local in-process `ContainmentGuard` in `crates/agent-sdk` for sub-microsecond local enforcement.
   - Interactive Operations Dashboard Policies & Containment Console with live simulation drawer and signed command table.
-- [ ] **Phase 5: Kernel & Runtime Telemetry Adapters (Tetragon, Falco, Hubble)**
-  - Direct gRPC/JSON ingestion adapters for Cilium Tetragon, Falco alerts, and Hubble flows.
-  - Compound kernel-to-application context correlation.
+- [x] **Phase 5: Kernel & Runtime Telemetry Adapters (Cilium Tetragon, Falco, Hubble)**
+  - Direct REST ingestion endpoints: `/api/v1/sensors/tetragon`, `/api/v1/sensors/falco`, `/api/v1/sensors/hubble`.
+  - Normalization of raw eBPF telemetry into canonical `SecurityEvent` while preserving sensor fidelity (Invariant #3).
+  - High-confidence kernel detection (container shell spawn `/bin/sh`, syscall anomalies, dropped network egress).
+  - Interactive dashboard sensor simulation dispatchers & telemetry drawer with container/process semantics.
 - [ ] **Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B)**
   - Optional, air-gapped Python worker for ambiguous, high-entropy incidents.
   - Strict Pydantic output validation; zero direct execution authority.
@@ -310,6 +312,12 @@ cargo test -p security-control-plane-agent-sdk
 
 # Phase 4 Capability Policy & Signed Containment Suite
 python tests/test_phase4_containment.py
+
+# Phase 5 Rust Sensor Adapter Tests
+cargo test -p security-control-plane-sensors
+
+# Phase 5 Kernel & Runtime Telemetry Test Suite
+python tests/test_phase5_sensors.py
 ```
 
 ---

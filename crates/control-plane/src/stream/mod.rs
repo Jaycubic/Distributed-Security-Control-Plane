@@ -54,6 +54,18 @@ impl MemoryEventStream {
     pub fn subscribe(&self) -> broadcast::Receiver<SecurityEvent> {
         self.sender.subscribe()
     }
+
+    /// Returns the most recent `limit` events from the in-memory backlog
+    /// without draining them. This is safe for read-only polling endpoints.
+    pub async fn get_recent(&self, limit: usize) -> Vec<SecurityEvent> {
+        let backlog = self.backlog.read().await;
+        let start = if backlog.len() > limit {
+            backlog.len() - limit
+        } else {
+            0
+        };
+        backlog[start..].to_vec()
+    }
 }
 
 #[async_trait]
