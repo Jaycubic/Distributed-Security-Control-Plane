@@ -239,9 +239,15 @@ The platform is designed to be built incrementally through vertical slices:
   - Deno-inspired capability context inference (`database.read`, `process.execute`, `data.export`, `admin.operation`).
   - RESTful entity and topology endpoints (`GET /api/v1/entities`, `GET /api/v1/correlation/graph`).
   - Frontend Identity & Correlation Console with graph topology inspection and 3-App attack chain simulation.
-- [ ] **Phase 4: Graduated Containment System, Signed Commands & Reversible TTLs**
-  - Capability-based actions: `REVOKE_SESSION`, `THROTTLE_ACTOR`, `BLOCK_NETWORK`, `ISOLATE_SERVICE`.
-  - Ed25519 signed control channel with mandatory TTLs and automated rollback.
+- [x] **Phase 4: Deno-Inspired Capability Policy Engine & Graduated Containment**
+  - Fine-grained scoped capability permissions (`network.connect`, `database.read`, `database.write`, `filesystem.read`, `process.execute`, `admin.operation`).
+  - Versioned declarative policy bundles (YAML/JSON) with absolute **`DENY` precedence over `ALLOW`**.
+  - Mode C policy simulation (dry-run) producing explainable prospective decisions without state mutation.
+  - Ed25519 cryptographically signed control channel with mandatory TTLs and replay protection.
+  - Graduated surgical containment actions (`REVOKE_SESSION`, `THROTTLE_ACTOR`, `BLOCK_NETWORK`, `REVOKE_CAPABILITY`, `RESTRICT_SCOPE`, `ISOLATE_SERVICE`).
+  - Automated TTL expiration sweeper and explicit operator reversibility (`POST /api/v1/containment/:id/rollback`).
+  - Local in-process `ContainmentGuard` in `crates/agent-sdk` for sub-microsecond local enforcement.
+  - Interactive Operations Dashboard Policies & Containment Console with live simulation drawer and signed command table.
 - [ ] **Phase 5: Kernel & Runtime Telemetry Adapters (Tetragon, Falco, Hubble)**
   - Direct gRPC/JSON ingestion adapters for Cilium Tetragon, Falco alerts, and Hubble flows.
   - Compound kernel-to-application context correlation.
@@ -296,6 +302,14 @@ cargo test -p security-control-plane-correlator
 
 # Phase 3 Cross-Application Correlation & Identity Test Suite
 python tests/test_phase3_correlation.py
+
+# Phase 4 Rust Unit Tests (Common, Engine, Agent-SDK)
+cargo test -p security-control-plane-common
+cargo test -p security-control-plane-engine
+cargo test -p security-control-plane-agent-sdk
+
+# Phase 4 Capability Policy & Signed Containment Suite
+python tests/test_phase4_containment.py
 ```
 
 ---

@@ -1,10 +1,14 @@
+pub mod containment;
 pub mod evaluator;
 pub mod incident;
+pub mod policy;
 pub mod rules;
 pub mod state;
 
+pub use containment::{ContainmentError, ContainmentManager};
 pub use evaluator::RuleEngine;
 pub use incident::{Incident, IncidentStatus, SecuritySignal};
+pub use policy::CapabilityPolicyEngine;
 pub use rules::{
     BruteForceRule, KernelAnomalyRule, MassDataScrapingRule, PrivilegeCreepRule,
     RapidApiEnumerationRule, Rule, UnauthorizedBurstRule,

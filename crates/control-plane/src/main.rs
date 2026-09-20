@@ -1,8 +1,12 @@
 use security_control_plane::{create_router, AppState, MemoryDurableSink, MemoryEventStream};
 use security_control_plane_correlator::CorrelationEngine;
-use security_control_plane_engine::{HotStateStore, MemoryHotState, RedisHotState, RuleEngine};
+use security_control_plane_engine::{
+    CapabilityPolicyEngine, ContainmentManager, HotStateStore, MemoryHotState, RedisHotState,
+    RuleEngine,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -16,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting Distributed Security Control Plane (Phase 3 - Identity Resolution & Cross-App Correlation)");
+    info!("Starting Distributed Security Control Plane (Phase 4 - Capability Policy Engine & Graduated Containment)");
 
     // Initialize decoupled Event Stream
     let stream = Arc::new(MemoryEventStream::new(50_000));
@@ -37,8 +41,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let engine = Arc::new(RuleEngine::with_default_rules(hot_state));
 
-    // Initialize Cross-Application Correlation Engine (Identity Resolution, Context Graph, Attack Sequences)
+    // Initialize Cross-Application Correlation Engine
     let correlator = Arc::new(CorrelationEngine::new());
+
+    // Phase 4: Initialize Deno-inspired Capability Policy Engine with default production baseline
+    let policy_engine = Arc::new(CapabilityPolicyEngine::with_default_policies());
+
+    // Phase 4: Initialize Ed25519 Graduated Containment Manager
+    let containment_mgr = Arc::new(ContainmentManager::with_random_keypair());
+    info!(
+        public_key = %containment_mgr.public_key_hex(),
+        "Ed25519 Control Plane signing keypair active"
+    );
+
+    // Spawn periodic background TTL expiration sweeper (runs every 5 seconds)
+    let sweeper_mgr = Arc::clone(&containment_mgr);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let expired = sweeper_mgr.sweep_expired().await;
+            if !expired.is_empty() {
+                info!(count = expired.len(), "Swept and expired containment commands past TTL");
+            }
+        }
+    });
 
     // Spawn out-of-band asynchronous detection & correlation worker
     let engine_worker = Arc::clone(&engine);
@@ -69,6 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         durable_sink,
         engine,
         correlator,
+        policy_engine,
+        containment_mgr,
     };
 
     let app = create_router(state);
@@ -84,6 +113,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Incidents REST API at http://{}/api/v1/incidents", addr);
     info!("Entities & Identity API at http://{}/api/v1/entities", addr);
     info!("Correlation Context Graph at http://{}/api/v1/correlation/graph", addr);
+    info!("Capability Policies API at http://{}/api/v1/policies", addr);
+    info!("Graduated Containment API at http://{}/api/v1/containment/commands", addr);
     info!("Prometheus metrics available at http://{}/api/v1/metrics", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

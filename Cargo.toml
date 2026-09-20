@@ -28,6 +28,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chron
 prometheus = "0.13"
 crossbeam-channel = "0.5"
 reqwest = { version = "0.12", features = ["json"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
+rand = "0.8"
+hex = "0.4"
 
 [profile.dev]
 incremental = false

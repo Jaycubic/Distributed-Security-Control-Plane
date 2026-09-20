@@ -134,3 +134,65 @@ export interface CorrelationGraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
+
+// Phase 4: Capability Policies & Graduated Containment Types
+
+export interface PolicyRule {
+  capability: string;
+  scope: string;
+  description?: string;
+}
+
+export interface PolicyBundle {
+  policy_id: string;
+  version: number;
+  target_app: string;
+  description: string;
+  allow: PolicyRule[];
+  deny: PolicyRule[];
+  default_allow: boolean;
+}
+
+export type DecisionOutcome = 'allow' | 'deny' | 'revoke' | 'restrict';
+
+export interface PolicyDecision {
+  decision_id: string;
+  who: string;
+  app_id: string;
+  capability: string;
+  target_resource: string;
+  policy_id: string;
+  decision: DecisionOutcome;
+  reason: string;
+  matched_rule?: string;
+  is_simulation: boolean;
+  evidence_event_ids: string[];
+  timestamp: string;
+}
+
+export type ContainmentActionType =
+  | 'REVOKE_SESSION'
+  | 'THROTTLE_ACTOR'
+  | 'BLOCK_NETWORK'
+  | 'REVOKE_CAPABILITY'
+  | 'RESTRICT_SCOPE'
+  | 'ISOLATE_SERVICE';
+
+export type ContainmentStatus = 'active' | 'expired' | 'rolled_back';
+
+export interface SignedContainmentCommand {
+  command_id: string;
+  action: ContainmentActionType;
+  target_entity: string;
+  capability?: string;
+  params: Record<string, string>;
+  ttl_seconds: number;
+  nonce: string;
+  evidence_incident_id?: string;
+  issued_at: string;
+  expires_at: string;
+  signer_public_key: string;
+  signature: string;
+  status: ContainmentStatus;
+  rollback_recipe: string;
+}

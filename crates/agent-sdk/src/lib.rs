@@ -1,3 +1,6 @@
+pub mod guard;
+
+pub use guard::ContainmentGuard;
 use chrono::Utc;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use security_control_plane_common::{
