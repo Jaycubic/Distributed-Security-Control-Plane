@@ -407,10 +407,11 @@ impl Rule for KernelAnomalyRule {
     ) -> Result<Option<SecuritySignal>, HotStateError> {
         let is_kernel_sensor = matches!(
             event.source.sensor.sensor_type,
-            SensorType::Tetragon | SensorType::Falco | SensorType::System
+            SensorType::Tetragon | SensorType::Falco | SensorType::System | SensorType::NativeSensor
         ) || event.event_type.contains("process_exec")
             || event.event_type.contains("falco")
-            || event.event_type.contains("tetragon");
+            || event.event_type.contains("tetragon")
+            || event.event_type.contains("kernel.execve");
 
         let suspicious_binaries = [
             "/bin/sh",

@@ -15,9 +15,9 @@ A compromised application can forge, replay, or suppress its own security teleme
 ### Current State
 The control plane currently **trusts all emitters**. There is no authentication, signing, or integrity verification on inbound telemetry from application middleware.
 
-### Mitigations (Planned)
-- **Kernel-level sensors** (Tetragon, Falco, Hubble) are harder to tamper with because they run in kernel space or as privileged DaemonSets, outside the application's control. Cross-referencing application telemetry against kernel telemetry can detect suppression — if Tetragon sees a process execution that the application emitter didn't report, that's a signal.
-- **Mutual TLS or signed telemetry** on the emitter → control plane channel would prevent unauthorized sources from injecting events, though it doesn't prevent a compromised app from dropping its own events.
+### Mitigations (Planned & Implemented)
+- **Native Kernel eBPF Sensor (Phase 6)**: The in-tree eBPF sensor hooks directly into kernel tracepoints (`sys_enter_execve`) and kprobes (`sys_connect`, `sys_bind`, `sys_accept4`). Unprivileged applications cannot forge or suppress kernel-level syscall events. Even if an attacker compromises application middleware, the kernel probe emits ground-truth telemetry.
+- **External sensor adapters** (Tetragon, Falco, Hubble) provide Kubernetes container runtime visibility outside the application container.
 - **Anomaly detection on telemetry volume**: A sudden drop in event rate from an application that was previously active is itself a detection signal.
 
 ---
@@ -30,16 +30,10 @@ The local enforcement agent is itself a target. An attacker who compromises the 
 - **Exfiltrate signing keys**: Steal the Ed25519 private key and forge containment commands.
 - **Replay old commands**: Re-execute expired containment actions.
 
-### Current State
+### Current State & Architecture v3 Evolution
 - Ed25519 signing is implemented with **mandatory TTLs** and **nonce-based replay protection**.
-- The signing key is generated in-process at startup and held in memory. There is **no key distribution, rotation, or revocation mechanism**.
-- The agent trusts the control plane's public key, but there is no mutual authentication.
-
-### Unsolved Problems
-- **Key distribution**: How do agents securely receive the control plane's public key at first contact? A compromised network could MitM this exchange.
-- **Key rotation**: If the signing key is compromised, there is no mechanism to rotate it and invalidate old keys across all agents.
-- **Key revocation**: There is no certificate revocation list or equivalent. A stolen key remains valid until the process restarts.
-- **Agent integrity**: The agent itself runs as a library inside the application process (`crates/agent-sdk`). A compromised application can bypass the agent entirely. A standalone sidecar agent (Phase 7+) would improve isolation but isn't implemented.
+- The signing key is held strictly by the control plane; agents verify signatures using public keys only.
+- **Native Enforcer (Phase 8)**: To eliminate reliance on in-process application agents, Phase 8 introduces OS-level containment (`nftables` DROP rules, XDP packet drops, SIGKILL). The control plane executes containment out-of-band at the kernel/firewall layer, meaning even a completely hijacked application process cannot refuse or bypass containment.
 
 ---
 
@@ -47,74 +41,52 @@ The local enforcement agent is itself a target. An attacker who compromises the 
 
 ### Threat
 The identity resolution layer merges heterogeneous identifiers (IP addresses, session tokens, user IDs, container IDs, PIDs) into unified entity nodes. Errors in this merging can have security consequences:
-- **False merge**: Two unrelated actors are merged into one entity. Containment actions intended for one affect both. An innocent user gets their session revoked because their IP was shared with an attacker (NAT, shared infrastructure).
-- **False split**: One actor appears as multiple entities. The system fails to correlate their activity across applications, and a multi-stage attack goes undetected.
+- **False merge**: Two unrelated actors are merged into one entity. Containment actions intended for one affect both.
+- **False split**: One actor appears as multiple entities. Multi-stage attack sequences go undetected.
 
 ### Current State
 - Entity resolution uses deterministic rules: same IP + same session token = same entity. Same user ID across applications = same entity.
-- There is **no confidence scoring** on identity merges.
-- There is **no undo mechanism** for incorrect merges.
-- IP-based correlation is inherently fragile in environments with NAT, shared proxies, or IPv6 privacy addresses.
-
-### Mitigations (Planned)
-- Confidence-weighted identity edges with a threshold below which merges are flagged but not committed.
-- Operator-facing identity graph inspection (partially implemented in the dashboard) to manually verify suspicious merges.
-- Prefer high-fidelity identifiers (user ID, session token) over low-fidelity ones (IP address) when building entity relationships.
+- There is **no confidence scoring** on identity merges yet.
+- Operator inspection via the live context graph API allows forensic validation.
 
 ---
 
-## 4. In-Memory State Durability
+## 4. State Durability & Single-Node Resilience
 
 ### Threat
-The correlation context graph, sliding-window rate counters, and incident state currently live entirely in memory. This means:
-- **A restart loses all state**: Active incidents, entity relationships, and rate-tracking windows are lost. An attacker who can cause a control plane restart effectively resets the security system.
-- **No horizontal scaling**: A single control plane instance is a throughput ceiling and a single point of failure for the security layer (though not for application availability, since the architecture is out-of-band).
+- **State loss on restart**: A restart losing in-memory correlation graph or rate windows allows an attacker to reset detection counters.
+- **Operational overhead**: Requiring external distributed databases (PostgreSQL, Redis) for small or single-server deployments introduces operational points of failure.
 
-### Current State
-- `MemoryContextGraph`, `MemoryEventStream`, and `MemoryDurableSink` are all in-process, single-node data structures.
-- Redis and PostgreSQL are in the architecture diagram but not yet integrated. The current system runs fully standalone with no external dependencies.
-
-### Mitigations (Planned)
-- Phase 7 introduces Redis for hot state (sliding windows, blacklists) and PostgreSQL for durable state (incidents, audit logs, filtered events).
-- The `DurableEventSink` and `HotStateStore` traits are designed as abstractions specifically to allow swapping in-memory implementations for persistent backends without changing the security logic.
-- Periodic state snapshots to disk could provide crash recovery even without external databases.
+### Architecture v3 Resolution
+- **Standalone Mode (`corvus`, Phase 9)**: Implements single-binary zero-dependency deployment using an embedded SQLite durable sink and `MemoryHotState`. This provides persistent storage for events, incidents, and containment audit logs without external operational dependencies.
+- **Distributed Mode**: In high-throughput deployments, Redis (hot sliding windows) and PostgreSQL (partitioned durable event store) can be enabled via feature flags.
 
 ---
 
-## 5. Detection Evasion
+## 5. Detection Evasion & Detect-and-Respond Latency
 
 ### Threat
-The deterministic detection engine uses sliding-window counters and threshold-based rules. An attacker who understands the detection rules can:
-- **Slow-play**: Stay below rate thresholds by spacing requests just outside the detection window.
-- **Distribute across identities**: Use multiple IPs, sessions, or accounts to keep each entity below the threshold.
-- **Exploit the detection-to-containment gap**: Act quickly and exfiltrate data before containment lands, since the architecture is detect-and-respond.
+- **Slow-play**: Staying below rate thresholds by spacing requests just outside the detection window.
+- **The Out-of-Band Window**: Because the control plane sits out-of-band to preserve zero request-path coupling, the system cannot prevent the first $N$ malicious requests inline. Containment takes effect after detection-to-containment latency.
 
 ### Current State
-- Detection rules are deterministic and threshold-based. They catch burst-pattern attacks reliably but are weaker against low-and-slow patterns.
-- The cross-application correlation engine can detect distributed attacks *if* the identity resolution layer correctly merges the attacker's identities — which circles back to the identity resolution problem above.
-
-### Mitigations (Planned)
-- Behavioral baselines (planned, not implemented) that detect deviations from normal patterns rather than absolute thresholds.
-- The Phase 6 advisory AI worker is designed to handle ambiguous, low-confidence signals that deterministic rules miss — but it is the lowest-priority phase.
+- Detection rules are deterministic and threshold-based.
+- **Advisory LLM Reasoning (Phase 11)**: Frozen until the native kernel, port, and enforcement foundation (Phases 6–10) is fully solidified. When activated in Mode B, it assists with ambiguous multi-stage reasoning, strictly bounded by the deterministic policy gate (`DENY > ALLOW`).
 
 ---
 
-## 6. Sensor-Specific Risks
+## 6. Sensor-Specific & eBPF Kernel Risks
 
-### Tetragon
-- Requires privileged access to the kernel. A compromised node with root access can disable or tamper with Tetragon.
-- The control plane trusts Tetragon's output without independent verification.
+### Native eBPF Sensor (Phase 6)
+- **Kernel Verifier Safety**: All in-tree eBPF programs are verified at load time by the Linux kernel verifier, guaranteeing termination, memory safety, and no panics.
+- **Ring Buffer Drops**: The 256 KB eBPF ring buffer prioritizes kernel stability over guaranteed event delivery. Under extreme syscall pressure, if the ring buffer fills, events are safely dropped rather than blocking the kernel syscall execution path.
+- **Privilege Requirements**: Loading requires root or `CAP_BPF + CAP_PERFMON` on Linux 5.15+ LTS with BTF (`/sys/kernel/btf/vmlinux`). Non-privileged environments gracefully fall back without crashing.
 
-### Falco
-- Falco's syscall-based rules can be evaded by using less-monitored syscalls or by operating at a level Falco doesn't instrument.
-- Alert fatigue from high false-positive rules can desensitize operators and degrade the correlation graph.
+### Port Guardian (Phase 7)
+- Processes binding to ephemeral ports could churn the port registry. Handled via sliding-window TTL eviction.
 
-### Hubble
-- Network flow data is metadata-only (L3/L4 headers, DNS labels). Encrypted payload content is not visible.
-- In high-throughput clusters, flow sampling may cause dropped events that create blind spots.
-
-### Current State
-All three sensor adapters currently process **simulated payloads** modeled on real formats. The normalization logic is tested, but sensor-specific edge cases (malformed events, partial fields, high-volume bursts) have not been validated against real sensor output in a live cluster.
+### External Sensor Adapters (Tetragon, Falco, Hubble)
+- Rest-based adapters validate incoming JSON against strict schemas; corrupted or malformed external sensor payloads are rejected at the ingestion boundary.
 
 ---
 

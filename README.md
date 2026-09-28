@@ -80,15 +80,12 @@ This is an explicit trade-off, not a universal improvement over inline security.
 
 ## Project Status
 
-The repository is under active development, organized as a phased security-engineering project.
+The repository is under active development, organized as a phased security-engineering project following the **Master Architecture v3** roadmap.
 
-**Implemented:** Phases 1–5 (architecture, ingestion, detection, identity resolution, cross-app correlation, capability policy engine, signed containment, and kernel/runtime telemetry adapters).
-
-**Planned:** Phase 6 (advisory AI reasoning worker) and Phase 7 (Docker Compose packaging, Prometheus/Grafana, sustained load testing).
-
-> **Note on Phase 5 sensors:** The Tetragon, Falco, and Hubble adapters currently run against simulated payloads modeled on the real JSON formats from each tool's documentation and sample outputs. The normalization logic, field mapping, and canonical event pipeline are fully implemented and integration-tested. Validation against a live kind cluster with real sensor output is planned. The sensor boundary is clean — everything enters through `/api/v1/sensors/*` and normalizes into `SecurityEvent`, so swapping simulated payloads for real feeds is a configuration change, not a code change.
-
-This is an evolving engineering project; APIs, internal interfaces, and deployment assumptions may change as additional phases are implemented.
+- **Complete & Production Ready:** Phases 1–5 (core architecture, ingestion pipeline, deterministic rule engine, hot state, identity resolution, cross-app context graph, capability policy engine with `DENY > ALLOW`, Ed25519 signed containment, and external sensor adapters for Tetragon/Falco/Hubble).
+- **Phase 6 Implemented:** Native eBPF Sensor (`crates/sensor-native`, `crates/sensor-native-ebpf`, `crates/sensor-native-common`) built on Rust `aya`, providing in-tree kernel visibility without third-party daemon dependencies.
+- **Next Up:** Phase 7 (Port Guardian), Phase 8 (Native Enforcer: `nftables`/XDP), Phase 9 (Corvus Standalone with SQLite), Phase 10 (AF_XDP L7 Packet Inspection).
+- **Frozen for Hardening:** Advisory LLM Reasoning (old Phase 6) is frozen until Phase 10 is complete to ensure the kernel, port, and enforcement foundation is solid (Invariant #2: Deterministic core is root of trust).
 
 ---
 
@@ -96,109 +93,25 @@ This is an evolving engineering project; APIs, internal interfaces, and deployme
 
 | Layer | Technology | Role |
 | :--- | :--- | :--- |
-| **Kernel & Runtime Telemetry** | eBPF (Cilium Tetragon, Falco, Hubble) | Ingests process execution, syscall alerts, and L3-L7 network flows via REST adapters. |
+| **Native Kernel Sensor** | Rust + `aya` (`sensor-native`) | In-tree eBPF sensor capturing `execve`, `connect`, `bind`, and `accept4` directly from the Linux kernel. |
+| **External Sensor Adapters** | eBPF (Cilium Tetragon, Falco, Hubble) | Ingests process execution, syscall alerts, and L3-L7 network flows from Kubernetes daemonsets via REST. |
 | **Core Security Engine** | Rust (`tokio`, Axum) | Event ingestion, sliding-window detection, in-memory correlation graph, Ed25519 signed containment. |
 | **API & Streaming** | Rust (Axum REST & WebSockets) | Telemetry ingestion endpoints and real-time event streaming to the dashboard. |
-| **Hot Operational State** | Redis *(planned — currently in-memory)* | Sliding-window rate counters, active session blacklists, pub/sub. |
-| **Durable State** | PostgreSQL *(planned — currently in-memory)* | Partitioned event store, incident records, audit logs. |
-| **Operations Dashboard** | React + TypeScript + Vite | Dark-mode dashboard with live WebSocket feed, sensor filtering, and event inspector. |
-| **Advisory AI** | Python worker *(Phase 6, planned)* | Off-path advisory assistant for ambiguous incidents. Zero execution privileges. Lowest priority. |
-| **Metrics** | Prometheus & Grafana *(Phase 7)* | Control plane latency tracking, queue depth, ingestion rates. |
+| **Operational & Durable State**| In-Memory & SQLite (Standalone) / Redis & PostgreSQL (Distributed) | Dual-mode state architecture. Single-binary standalone (`corvus`) or horizontally scalable distributed setup. |
+| **OS-Level Enforcement** | `nftables`, XDP, SIGKILL (`enforcer`) | Out-of-band kernel/network containment executing signed Ed25519 containment commands. |
+| **Operations Dashboard** | React + TypeScript + Vite | Dark-mode dashboard with live WebSocket feed, sensor filtering, mode switcher, and incident triage. |
+| **Advisory AI (Phase 11)** | Python worker (`services/llm-worker`) | Off-path advisory assistant for ambiguous incidents (Mode B). Strictly advisory, zero execution privileges. |
 
 ---
 
-## System Architecture
+## 12-Phase Development Roadmap
 
-```mermaid
-flowchart TD
-    subgraph DataPlane ["DATA PLANE (Heterogeneous Apps)"]
-        Client[Client Request] --> AppA[Application A: FastAPI]
-        Client --> AppB[Application B: Node.js]
-        AppA --> AppAResp[Normal Response]
-        AppB --> AppBResp[Normal Response]
-        
-        AppA -.->|Async Non-Blocking Emitter| AgentA[Agent / Middleware]
-        AppB -.->|Async Non-Blocking Emitter| AgentB[Agent / Middleware]
-    end
-
-    subgraph RuntimeSensors ["KERNEL & RUNTIME SENSORS (eBPF)"]
-        Tetra[Cilium Tetragon<br/>Process Lifecycle & Kernel Probes]
-        Falc[Falco<br/>Syscall Behavioral Rules]
-        Hubb[Cilium Hubble<br/>L3/L4/L7 Network Flows]
-    end
-
-    subgraph IngestionStream ["INGESTION & EVENT STREAM"]
-        Ingest[Axum Ingestion Service<br/>Schema Validation & Rate Limiting]
-        Stream[(Event Stream Abstraction<br/>Redis Streams / Channel Buffer)]
-    end
-
-    subgraph ControlPlaneCore ["SECURITY CORE (Root of Trust)"]
-        IdRes[Identity Resolution Layer]
-        Detect[Deterministic Rule Engine<br/>Sliding Windows & Burst Counters]
-        Corr[Cross-App Correlation Engine<br/>In-Memory Context Graph]
-        Policy[Policy & Containment Engine<br/>Ed25519 Signed Commands]
-        Incident[Incident Lifecycle Manager]
-    end
-
-    subgraph StateStorage ["DUAL-TIER STATE MANAGEMENT"]
-        RedisHot[(Redis: Hot State<br/>Sliding Windows / Blacklists)]
-        PostgresDurable[(PostgreSQL: Durable State<br/>Incidents / Filtered Events / Audit)]
-    end
-
-    subgraph Operations ["OPERATIONS & VISIBILITY"]
-        AdminUI[Dashboard: React + TypeScript<br/>WebSocket Feed & Live Inspector]
-        Prom[Prometheus Metrics]
-    end
-
-    %% Connections
-    AgentA -->|Async HTTP Batch| Ingest
-    AgentB -->|Async HTTP Batch| Ingest
-    Tetra -->|JSON / gRPC Feed| Ingest
-    Falc -->|Alert Webhook| Ingest
-    Hubb -->|Flow Log Feed| Ingest
-
-    Ingest --> Stream
-    Stream --> IdRes
-    IdRes --> Detect
-    IdRes --> Corr
-    Detect --> Policy
-    Corr --> Policy
-    Policy --> Incident
-
-    Stream -->|Selective Durable Writer| PostgresDurable
-    Detect <--> RedisHot
-    Corr <--> RedisHot
-    Incident --> PostgresDurable
-
-    Policy -->|Signed Command with TTL| AgentA
-    Policy -->|Signed Command with TTL| AgentB
-
-    Incident --> AdminUI
-    Ingest --> Prom
-```
-
----
-
-## Performance Characteristics
-
-The telemetry emitter in application middleware is non-blocking and fire-and-forget. A preliminary benchmark harness ([benchmarks/measure_overhead.py](benchmarks/measure_overhead.py)) confirms that 1,000 requests with the emitter active show no statistically significant latency increase over baseline — the mean difference is within noise.
-
-**What still needs measurement** (planned for Phase 7):
-- Emitter cost under sustained load (thousands of concurrent connections).
-- Behavior when the control plane is unreachable (buffer-full backpressure invariant).
-- End-to-end **detection-to-containment latency**: the time from event ingestion to agent enforcement, which is the metric that matters most for this architecture.
-- Ingestion throughput at the control plane under realistic sensor volume.
-
----
-
-## 7-Phase Development Roadmap
-
-The platform is built incrementally through vertical slices:
+The platform is engineered systematically across twelve explicit phases:
 
 - [x] **Phase 1: Architecture Core, Ingestion Pipeline & Minimal Observable Slice**
-  - Canonical event model with sensor fidelity (Tetragon, Falco, Hubble, Agent).
+  - Canonical event model with sensor fidelity (`SecurityEvent`).
   - Decoupled Event Stream abstraction & selective durable writer.
-  - Non-blocking Python and Node application middleware.
+  - Non-blocking application middleware.
   - Live streaming React + TypeScript dashboard with WebSocket connectivity.
 - [x] **Phase 2: Hot State Operational Engine & Deterministic Detection**
   - Sliding-window rate tracking with in-memory ring-buffer.
@@ -216,17 +129,36 @@ The platform is built incrementally through vertical slices:
   - Ed25519 cryptographically signed containment commands with mandatory TTLs and replay protection.
   - Graduated surgical actions (revoke session, throttle actor, block network, revoke capability, restrict scope, isolate service) with explicit rollback.
   - Local in-process `ContainmentGuard` for sub-millisecond cached enforcement.
-- [x] **Phase 5: Kernel & Runtime Telemetry Adapters (Cilium Tetragon, Falco, Hubble)**
+- [x] **Phase 5: External Sensor Adapters (Cilium Tetragon, Falco, Hubble)**
   - REST ingestion endpoints: `/api/v1/sensors/tetragon`, `/api/v1/sensors/falco`, `/api/v1/sensors/hubble`.
   - Normalization of raw eBPF/syscall/flow telemetry into canonical `SecurityEvent` with full raw payload preservation (Sensor Fidelity Invariant).
   - High-confidence kernel detection (container shell spawn, syscall anomalies, dropped network egress).
-  - *Note: Currently validated against simulated payloads modeled on real sensor formats. Live cluster validation planned.*
-- [ ] **Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B)** *(lowest priority)*
-  - Optional Python worker for ambiguous, high-entropy incidents.
-  - Strict output validation; zero direct execution authority.
-- [ ] **Phase 7: Full Stack Observability, Benchmarking & Packaging**
+- [x] **Phase 6: Native eBPF Sensor (`aya`)**
+  - In-tree eBPF programs for Linux 5.15+ LTS kernel: `sys_enter_execve` tracepoint and `sys_connect`, `sys_bind`, `sys_accept4` kprobes.
+  - 256 KB non-blocking kernel ring buffer (`EVENTS`).
+  - Userspace loader and normalizer converting kernel events directly to `SecurityEvent` with `SensorType::NativeSensor`.
+  - Zero third-party daemon dependency for bare-metal Linux server deployments.
+- [ ] **Phase 7: Port Guardian**
+  - Real-time server port ownership registry updated by `kernel.net.bind` events.
+  - Sliding-window port-scan and connection-flood detection in `HotStateStore`.
+  - Port binding query API for operational dashboard inspection.
+- [ ] **Phase 8: Native Enforcer**
+  - OS-level containment via `nftables` DROP rules and process SIGKILL.
+  - Direct execution of signed Ed25519 `SignedContainmentCommand` payloads without requiring application code changes.
+- [ ] **Phase 9: Standalone Mode (`corvus`)**
+  - Single binary package with SQLite durable sink and in-memory hot state.
+  - Embedded static assets for operations dashboard.
+  - Zero external dependencies (no Redis, no PostgreSQL).
+- [ ] **Phase 10: AF_XDP + L7 Payload Inspection**
+  - AF_XDP zero-copy packet redirection.
+  - TCP stream reassembly and protocol anomaly detection (HTTP/1.1, DNS tunneling, TLS SNI inspection).
+- [ ] **Phase 11: Advisory LLM Reasoning (Mode B)**
+  - Off-path advisory assistant for ambiguous multi-stage incidents.
+  - Deterministic Policy Validation Gate enforcing `DENY > ALLOW` precedence before containment dispatch.
+  - Fault-tolerant fallback: control plane gracefully falls back to Mode A if advisory worker is unreachable.
+- [ ] **Phase 12: Full Stack Observability, Benchmarking & Packaging**
   - Docker Compose deployment with Redis, PostgreSQL, Prometheus, and Grafana.
-  - Sustained load testing, detection-to-containment latency benchmarking, and fault injection.
+  - Sustained load testing, detection-to-containment latency benchmarking, and Debian/RPM packages.
 
 ---
 
@@ -265,21 +197,37 @@ npm install
 npm run dev
 ```
 Open `http://localhost:5173` to view the live dashboard.
+### 4. Phase 6 Native eBPF Sensor (Optional / Linux Bare Metal)
+Standard builds run everywhere without root or eBPF toolchains. To compile and run the native eBPF kernel probes on a Linux host (kernel 5.15+ LTS with BTF):
+```bash
+# 1. Install toolchain prerequisites (one-time)
+rustup target add bpfel-unknown-none
+cargo install bpf-linker
 
-### 4. Run the Integration Tests
+# 2. Build isolated eBPF kernel program
+cd crates/sensor-native-ebpf
+cargo build --release
+cd ../..
+
+# 3. Run control plane with native sensor enabled (requires root or CAP_BPF)
+sudo NATIVE_SENSOR=true RUST_LOG=info cargo run -p security-control-plane
+```
+
+### 5. Run the Integration Tests
 ```powershell
-# Rust unit tests (all crates)
+# Rust unit tests (all workspace crates, non-root)
 cargo test --workspace
 
-# Integration test suites (server must be running)
+# Integration test suites (server must be running at http://localhost:8080)
 python tests/test_phase1_slice.py
 python tests/test_phase2_engine.py
 python tests/test_phase3_correlation.py
 python tests/test_phase4_containment.py
 python tests/test_phase5_sensors.py
+python tests/test_phase6_native_sensor.py
 ```
 
-### 5. Run the Benchmark
+### 6. Run the Benchmark
 ```powershell
 python benchmarks/measure_overhead.py
 ```

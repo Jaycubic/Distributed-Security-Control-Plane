@@ -1,8 +1,10 @@
-use security_control_plane::{create_router, AppState, MemoryDurableSink, MemoryEventStream};
+use security_control_plane::{
+    create_router, AppState, EventStreamProducer, MemoryDurableSink, MemoryEventStream,
+};
 use security_control_plane_correlator::CorrelationEngine;
 use security_control_plane_engine::{
-    CapabilityPolicyEngine, ContainmentManager, HotStateStore, MemoryHotState, RedisHotState,
-    RuleEngine,
+    AdvisoryManager, CapabilityPolicyEngine, ContainmentManager, HotStateStore, MemoryHotState,
+    RedisHotState, RuleEngine,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting Distributed Security Control Plane (Phase 5 - Kernel & Runtime Telemetry Adapters: Tetragon, Falco, Hubble)");
+    info!("Starting Distributed Security Control Plane (Phase 6 - Advisory Off-Path LLM Reasoning Service: Mode B)");
 
     // Initialize decoupled Event Stream
     let stream = Arc::new(MemoryEventStream::new(50_000));
@@ -52,6 +54,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         public_key = %containment_mgr.public_key_hex(),
         "Ed25519 Control Plane signing keypair active"
+    );
+
+    // Phase 6: Initialize Advisory Manager and Deterministic Policy Gate (Mode A baseline default)
+    let advisory_mgr = Arc::new(AdvisoryManager::with_defaults(
+        Arc::clone(&policy_engine),
+        Arc::clone(&containment_mgr),
+    ));
+    info!(
+        mode = advisory_mgr.get_mode().await.as_str(),
+        worker_url = %advisory_mgr.get_worker_url().await,
+        "Advisory Off-Path Reasoning Controller initialized"
     );
 
     // Spawn periodic background TTL expiration sweeper (runs every 5 seconds)
@@ -91,6 +104,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Phase 6: Start native eBPF sensor if enabled and running as root
+    if std::env::var("NATIVE_SENSOR")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        let hostname = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "localhost".to_string());
+
+        let loader = security_control_plane_sensor_native::NativeSensorLoader::new(hostname);
+
+        match loader.start().await {
+            Ok(mut rx) => {
+                let stream_clone = Arc::clone(&stream);
+                tokio::spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        if let Err(e) = stream_clone.publish(&event).await {
+                            tracing::warn!(error = %e, "Native sensor event publish failed");
+                        }
+                    }
+                });
+                info!("Native eBPF sensor active — replacing Tetragon/Falco/Hubble");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Native eBPF sensor failed to start — falling back to external sensors"
+                );
+            }
+        }
+    }
+
     let state = AppState {
         stream,
         durable_sink,
@@ -98,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         correlator,
         policy_engine,
         containment_mgr,
+        advisory_mgr,
     };
 
     let app = create_router(state);
@@ -118,6 +164,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Kernel Telemetry (Cilium Tetragon) at http://{}/api/v1/sensors/tetragon", addr);
     info!("Runtime Telemetry (Falco Syscalls) at http://{}/api/v1/sensors/falco", addr);
     info!("Network Telemetry (Cilium Hubble Flows) at http://{}/api/v1/sensors/hubble", addr);
+    info!("Execution Mode API at http://{}/api/v1/mode", addr);
+    info!("Advisory AI Reasoning API at http://{}/api/v1/advisory/recommendations", addr);
     info!("Prometheus metrics available at http://{}/api/v1/metrics", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

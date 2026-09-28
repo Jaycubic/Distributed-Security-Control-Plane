@@ -196,3 +196,39 @@ export interface SignedContainmentCommand {
   status: ContainmentStatus;
   rollback_recipe: string;
 }
+
+export type ThreatClassification = 'BENIGN' | 'SUSPICIOUS' | 'MALICIOUS' | 'UNCERTAIN';
+
+export interface AdvisoryRecommendation {
+  recommendation_id: string;
+  incident_id: string;
+  target_entity: string;
+  app_id: string;
+  classification: ThreatClassification;
+  confidence: number;
+  reason_codes: string[];
+  reasoning_summary: string;
+  recommended_action: ContainmentActionType;
+  capability?: string;
+  params: Record<string, string>;
+  suggested_ttl_seconds: number;
+  model_provider: string;
+  created_at: string;
+}
+
+export interface AdvisoryValidationResult {
+  validation_id: string;
+  recommendation_id: string;
+  incident_id: string;
+  is_authorized: boolean;
+  decision: DecisionOutcome;
+  policy_id: string;
+  rationale: string;
+  containment_command_id?: string;
+  evaluated_at: string;
+}
+
+export interface AdvisoryHistoryItem {
+  recommendation: AdvisoryRecommendation;
+  validation: AdvisoryValidationResult;
+}

@@ -1,0 +1,24 @@
+[package]
+name = "security-control-plane-sensor-native"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+security-control-plane-common = { path = "../common" }
+security-control-plane-sensor-native-common = { path = "../sensor-native-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.13", features = ["async_tokio"] }
+aya-log = { version = "0.2" }
+
+[target.'cfg(target_os = "linux")'.dependencies.security-control-plane-sensor-native-common]
+path = "../sensor-native-common"
+features = ["user"]

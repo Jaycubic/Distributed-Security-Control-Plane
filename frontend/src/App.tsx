@@ -3,15 +3,23 @@ import {
   Shield, Activity, Server, Database, Eye, Terminal, 
   Cpu, CheckCircle, AlertTriangle, Flame,
   ArrowUpRight, Play, Pause, Search, Radio, Lock, RefreshCw, XCircle,
-  Network, Share2, Layers, GitMerge, Sliders, Key, Zap, Clock, ShieldAlert, FileText
+  Network, Share2, Layers, GitMerge, Sliders, Key, Zap, Clock, ShieldAlert, FileText,
+  Bot, Sparkles
 } from 'lucide-react';
 import { 
   SecurityEvent, Incident, CanonicalEntity, CorrelationGraphData,
-  PolicyBundle, PolicyDecision, SignedContainmentCommand, ContainmentActionType
+  PolicyBundle, PolicyDecision, SignedContainmentCommand, ContainmentActionType,
+  AdvisoryHistoryItem
 } from './types';
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'telemetry' | 'incidents' | 'correlation' | 'containment'>('telemetry');
+  const [activeTab, setActiveTab] = useState<'telemetry' | 'incidents' | 'correlation' | 'containment' | 'advisory'>('telemetry');
+  const [controlPlaneMode, setControlPlaneMode] = useState<string>('Mode A (Deterministic)');
+  const [isModeB, setIsModeB] = useState<boolean>(false);
+  const [advisoryWorkerUrl, setAdvisoryWorkerUrl] = useState<string>('http://localhost:8000');
+  const [advisoryHistory, setAdvisoryHistory] = useState<AdvisoryHistoryItem[]>([]);
+  const [isAnalyzingAdvisory, setIsAnalyzingAdvisory] = useState<boolean>(false);
+  const [advisoryNotification, setAdvisoryNotification] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [policies, setPolicies] = useState<PolicyBundle[]>([]);
   const [containmentCommands, setContainmentCommands] = useState<SignedContainmentCommand[]>([]);
   const [selectedPolicy, setSelectedPolicy] = useState<PolicyBundle | null>(null);
@@ -95,10 +103,94 @@ export const App: React.FC = () => {
     }
   };
 
+  // Phase 6: Fetch Control Plane execution mode (Mode A vs Mode B)
+  const fetchMode = async () => {
+    try {
+      const res = await fetch('http://localhost:8080/api/v1/mode');
+      if (res.ok) {
+        const data = await res.json();
+        setControlPlaneMode(data.mode);
+        setIsModeB(data.is_mode_b);
+        if (data.worker_url) setAdvisoryWorkerUrl(data.worker_url);
+      }
+    } catch (e) {
+      console.log('Mode fetch error:', e);
+    }
+  };
+
+  // Phase 6: Toggle Control Plane mode
+  const handleToggleMode = async () => {
+    try {
+      const targetMode = isModeB ? 'mode_a' : 'mode_b';
+      const res = await fetch('http://localhost:8080/api/v1/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: targetMode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setControlPlaneMode(data.mode);
+        setIsModeB(data.is_mode_b);
+        setAdvisoryNotification({ type: 'success', text: `Execution mode switched to ${data.mode}` });
+      }
+    } catch (e) {
+      setAdvisoryNotification({ type: 'error', text: `Failed to toggle mode: ${e}` });
+    } finally {
+      setTimeout(() => setAdvisoryNotification(null), 4000);
+    }
+  };
+
+  // Phase 6: Fetch historical advisory recommendations
+  const fetchAdvisoryHistory = async () => {
+    try {
+      const res = await fetch('http://localhost:8080/api/v1/advisory/recommendations');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) setAdvisoryHistory(data);
+      }
+    } catch (e) {
+      console.log('Advisory history fetch error:', e);
+    }
+  };
+
+  // Phase 6: Request off-path advisory reasoning for an ambiguous incident
+  const handleRequestAdvisory = async (incidentId: string) => {
+    setIsAnalyzingAdvisory(true);
+    setAdvisoryNotification(null);
+    try {
+      const res = await fetch(`http://localhost:8080/api/v1/advisory/analyze/${incidentId}`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAdvisoryNotification({ type: 'error', text: data.error || 'Failed to trigger advisory analysis' });
+      } else {
+        if (data.status === 'fallback') {
+          setAdvisoryNotification({ type: 'info', text: data.message });
+        } else {
+          setAdvisoryNotification({ 
+            type: 'success', 
+            text: `Advisory analysis completed: Gate ${data.validation?.is_authorized ? 'APPROVED & SIGNED' : 'REJECTED BY POLICY'}` 
+          });
+        }
+        fetchAdvisoryHistory();
+        fetchIncidents();
+        fetchPoliciesAndContainment();
+      }
+    } catch (e) {
+      setAdvisoryNotification({ type: 'error', text: `Advisory network error: ${e}` });
+    } finally {
+      setIsAnalyzingAdvisory(false);
+      setTimeout(() => setAdvisoryNotification(null), 5000);
+    }
+  };
+
   useEffect(() => {
     fetchIncidents();
     fetchEntitiesAndGraph();
     fetchPoliciesAndContainment();
+    fetchMode();
+    fetchAdvisoryHistory();
   }, []);
 
   // Connect to Control Plane WebSocket live stream (events + incident alerts)
@@ -552,7 +644,7 @@ export const App: React.FC = () => {
               Distributed Security Control Plane
             </h1>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '4px 0 0 0' }}>
-              Phase 5: Kernel &amp; Runtime Telemetry Adapters (Cilium Tetragon, Falco, Hubble) | Deno Capabilities &amp; Signed Containment
+              Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B) | Deterministic Policy Gate &amp; Multi-Sensor Fusion
             </p>
           </div>
         </div>
@@ -640,19 +732,51 @@ export const App: React.FC = () => {
                 </span>
               )}
             </button>
+            <button
+              id="tab-advisory"
+              onClick={() => { setActiveTab('advisory'); fetchMode(); fetchAdvisoryHistory(); }}
+              style={{
+                background: activeTab === 'advisory' ? 'rgba(168, 85, 247, 0.25)' : 'transparent',
+                border: activeTab === 'advisory' ? '1px solid #c084fc' : '1px solid transparent',
+                color: activeTab === 'advisory' ? '#fff' : 'var(--text-secondary)',
+                padding: '6px 14px', borderRadius: 7, cursor: 'pointer', fontSize: '0.82rem', fontWeight: 600,
+                display: 'flex', alignItems: 'center', gap: 6, transition: 'all 0.15s ease'
+              }}
+            >
+              <Bot size={14} color={activeTab === 'advisory' ? '#c084fc' : 'inherit'} />
+              Advisory AI (Mode B)
+              {advisoryHistory.length > 0 && (
+                <span style={{ 
+                  background: '#a855f7', color: '#fff', 
+                  fontSize: '0.7rem', padding: '1px 6px', borderRadius: 10, fontWeight: 700 
+                }}>
+                  {advisoryHistory.length}
+                </span>
+              )}
+            </button>
           </div>
 
-          {/* Engine Mode Badge */}
-          <div style={{ 
-            display: 'flex', alignItems: 'center', gap: 8, 
-            padding: '6px 14px', borderRadius: 20, 
-            background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border-subtle)'
-          }}>
-            <Cpu size={15} color="var(--accent-cyan)" />
-            <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-              Mode A (Deterministic)
+          {/* Interactive Engine Mode Switcher */}
+          <button 
+            id="btn-mode-toggle"
+            onClick={handleToggleMode}
+            title="Click to toggle execution mode (Mode A vs Mode B)"
+            style={{ 
+              display: 'flex', alignItems: 'center', gap: 8, 
+              padding: '6px 14px', borderRadius: 20, 
+              background: isModeB ? 'rgba(168, 85, 247, 0.15)' : 'rgba(56, 189, 248, 0.1)', 
+              border: `1px solid ${isModeB ? '#a855f7' : 'var(--accent-cyan)'}`,
+              cursor: 'pointer', transition: 'all 0.2s ease'
+            }}
+          >
+            {isModeB ? <Sparkles size={15} color="#c084fc" /> : <Cpu size={15} color="var(--accent-cyan)" />}
+            <span style={{ fontSize: '0.8rem', fontWeight: 700, color: isModeB ? '#e9d5ff' : 'var(--accent-cyan)' }}>
+              {controlPlaneMode}
             </span>
-          </div>
+            <span style={{ fontSize: '0.65rem', background: 'rgba(255,255,255,0.1)', padding: '1px 6px', borderRadius: 10, color: '#fff' }}>
+              Toggle
+            </span>
+          </button>
 
           {/* Connection Status */}
           <div style={{ 
@@ -1264,6 +1388,32 @@ export const App: React.FC = () => {
                       background: selectedIncident.risk_score >= 100 ? 'var(--accent-rose)' : selectedIncident.risk_score >= 50 ? '#fb923c' : 'var(--accent-cyan)' 
                     }} />
                   </div>
+                </div>
+
+                {/* Phase 6: Advisory Reasoning (Mode B) Trigger */}
+                <div style={{ marginBottom: 14 }}>
+                  <button
+                    id="btn-incident-request-advisory"
+                    onClick={() => handleRequestAdvisory(selectedIncident.incident_id)}
+                    disabled={isAnalyzingAdvisory}
+                    style={{
+                      width: '100%', padding: '9px 14px', borderRadius: 6,
+                      background: isModeB ? 'linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(99, 102, 241, 0.2))' : 'rgba(255,255,255,0.04)',
+                      border: `1px solid ${isModeB ? '#c084fc' : 'var(--border-subtle)'}`,
+                      color: isModeB ? '#e9d5ff' : 'var(--text-muted)',
+                      fontWeight: 700, cursor: isModeB ? 'pointer' : 'not-allowed',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      fontSize: '0.8rem', transition: 'all 0.2s ease'
+                    }}
+                    title={isModeB ? "Trigger off-path advisory AI investigation" : "Mode B is disabled (Enable via top bar to activate)"}
+                  >
+                    <Bot size={15} />
+                    {isAnalyzingAdvisory 
+                      ? 'Running Advisory Reasoning...' 
+                      : isModeB 
+                        ? 'Request Advisory AI Reasoning (Mode B)' 
+                        : 'Mode B Disabled (Enable in Top Bar)'}
+                  </button>
                 </div>
 
                 {/* Signals Timeline */}
@@ -1914,7 +2064,247 @@ export const App: React.FC = () => {
             </div>
           </div>
         </div>
-      )}
+      ) : activeTab === 'advisory' ? (
+        /* Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B) */
+        <div style={{ display: 'grid', gridTemplateColumns: '420px 1fr', gap: 18 }}>
+          {/* Left Column: Mode B Controller & Ambiguous Incident Queue */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+            {/* Controller Card */}
+            <div className="glass-panel" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Sparkles size={16} color="#c084fc" />
+                  Dual Mode Controller
+                </h3>
+                <span style={{ 
+                  fontSize: '0.72rem', fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                  background: isModeB ? 'rgba(168, 85, 247, 0.2)' : 'rgba(56, 189, 248, 0.15)',
+                  color: isModeB ? '#d8b4fe' : 'var(--accent-cyan)',
+                  border: `1px solid ${isModeB ? '#a855f7' : 'var(--accent-cyan)'}`
+                }}>
+                  {controlPlaneMode}
+                </span>
+              </div>
+
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 14 }}>
+                {isModeB 
+                  ? "Mode B active: Asynchronous, off-path LLM reasoning layer evaluates ambiguous incidents. Recommendations must pass through the Deterministic Policy Gate before any action is signed."
+                  : "Mode A active: Baseline security mode. Control plane runs 100% deterministically with sub-millisecond evaluation. The LLM is completely off-path and disabled."}
+              </p>
+
+              <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+                <button
+                  id="btn-switch-mode"
+                  onClick={handleToggleMode}
+                  style={{
+                    flex: 1, padding: '8px 14px', borderRadius: 6,
+                    background: isModeB ? 'rgba(244, 63, 94, 0.15)' : 'rgba(168, 85, 247, 0.2)',
+                    border: `1px solid ${isModeB ? 'var(--accent-rose)' : '#a855f7'}`,
+                    color: isModeB ? '#fda4af' : '#d8b4fe', fontWeight: 700, cursor: 'pointer',
+                    fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6
+                  }}
+                >
+                  <Cpu size={14} />
+                  {isModeB ? "Switch to Mode A (Deterministic)" : "Enable Mode B (Advisory AI)"}
+                </button>
+              </div>
+
+              <div style={{ padding: 10, background: 'rgba(0,0,0,0.3)', borderRadius: 6, border: '1px solid var(--border-subtle)', fontSize: '0.72rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Worker URL:</span>
+                  <span style={{ fontFamily: 'var(--font-mono)' }}>{advisoryWorkerUrl}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Safety Guarantee:</span>
+                  <span style={{ color: 'var(--accent-emerald)', fontWeight: 600 }}>Zero Direct Execution Privileges</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Ambiguous Incident Queue */}
+            <div className="glass-panel" style={{ padding: 20, flex: 1, display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Flame size={16} color="var(--accent-rose)" />
+                  Incident Queue ({incidents.filter(i => i.status === 'open' || i.status === 'investigating').length})
+                </h3>
+              </div>
+
+              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 12px 0' }}>
+                Select an incident to request asynchronous advisory threat reasoning:
+              </p>
+
+              <div style={{ overflowY: 'auto', maxHeight: 400, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {incidents.filter(i => i.status === 'open' || i.status === 'investigating').length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                    No pending open incidents
+                  </div>
+                ) : (
+                  incidents.filter(i => i.status === 'open' || i.status === 'investigating').map(inc => (
+                    <div 
+                      key={inc.incident_id}
+                      style={{
+                        padding: 10, borderRadius: 6, background: 'rgba(255,255,255,0.02)',
+                        border: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                      }}
+                    >
+                      <div style={{ maxWidth: '65%' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {inc.title}
+                        </div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                          {inc.target_entity} | Risk: {inc.risk_score}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleRequestAdvisory(inc.incident_id)}
+                        disabled={isAnalyzingAdvisory}
+                        style={{
+                          padding: '4px 10px', borderRadius: 4,
+                          background: isModeB ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255,255,255,0.05)',
+                          border: `1px solid ${isModeB ? '#a855f7' : 'var(--border-subtle)'}`,
+                          color: isModeB ? '#d8b4fe' : 'var(--text-muted)',
+                          fontSize: '0.72rem', fontWeight: 700, cursor: isModeB ? 'pointer' : 'not-allowed',
+                          display: 'flex', alignItems: 'center', gap: 4
+                        }}
+                      >
+                        <Bot size={12} />
+                        Analyze
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Right Column: Advisory Recommendations & Gate Validations Stream */}
+          <div className="glass-panel" style={{ padding: 20, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h2 style={{ fontSize: '1.05rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Bot size={18} color="#a855f7" />
+                Advisory Recommendations &amp; Deterministic Gate Audit ({advisoryHistory.length})
+              </h2>
+              <span style={{ fontSize: '0.75rem', color: 'var(--accent-emerald)', fontWeight: 600 }}>
+                Invariant: DENY &gt; ALLOW Strictly Enforced
+              </span>
+            </div>
+
+            {advisoryNotification && (
+              <div style={{ 
+                padding: '8px 14px', borderRadius: 6, marginBottom: 12, fontSize: '0.8rem',
+                background: advisoryNotification.type === 'success' ? 'rgba(16, 185, 129, 0.15)' : advisoryNotification.type === 'error' ? 'rgba(244, 63, 94, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                border: `1px solid ${advisoryNotification.type === 'success' ? 'var(--accent-emerald)' : advisoryNotification.type === 'error' ? 'var(--accent-rose)' : 'var(--accent-cyan)'}`,
+                color: advisoryNotification.type === 'success' ? '#6ee7b7' : advisoryNotification.type === 'error' ? '#fda4af' : '#7dd3fc'
+              }}>
+                {advisoryNotification.text}
+              </div>
+            )}
+
+            {advisoryHistory.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)' }}>
+                <Bot size={40} color="rgba(255,255,255,0.15)" style={{ margin: '0 auto 12px' }} />
+                <p style={{ margin: 0, fontSize: '0.9rem', fontWeight: 600 }}>No advisory recommendations logged yet</p>
+                <p style={{ margin: '6px 0 0 0', fontSize: '0.78rem' }}>
+                  Enable Mode B and trigger analysis from the incident queue to receive structured recommendations.
+                </p>
+              </div>
+            ) : (
+              <div style={{ overflowY: 'auto', maxHeight: 600, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {advisoryHistory.slice().reverse().map((item, idx) => {
+                  const rec = item.recommendation;
+                  const val = item.validation;
+                  const isApproved = val?.is_authorized;
+
+                  return (
+                    <div 
+                      key={idx}
+                      style={{
+                        padding: 16, borderRadius: 8,
+                        background: 'rgba(255,255,255,0.02)',
+                        border: `1px solid ${isApproved ? 'rgba(16, 185, 129, 0.3)' : 'rgba(244, 63, 94, 0.3)'}`,
+                      }}
+                    >
+                      {/* Top Header */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ 
+                            fontSize: '0.72rem', fontWeight: 800, padding: '2px 8px', borderRadius: 4,
+                            background: rec.classification === 'MALICIOUS' ? 'var(--accent-rose)' : rec.classification === 'SUSPICIOUS' ? '#fb923c' : 'rgba(255,255,255,0.1)',
+                            color: '#fff'
+                          }}>
+                            {rec.classification}
+                          </span>
+                          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                            Target: <strong style={{ color: 'var(--accent-cyan)' }}>{rec.target_entity}</strong> ({rec.app_id})
+                          </span>
+                        </div>
+
+                        {/* Gate Status Badge */}
+                        <div style={{ 
+                          fontSize: '0.75rem', fontWeight: 800, padding: '3px 10px', borderRadius: 6,
+                          background: isApproved ? 'rgba(16, 185, 129, 0.2)' : 'rgba(244, 63, 94, 0.2)',
+                          color: isApproved ? '#6ee7b7' : '#fda4af',
+                          border: `1px solid ${isApproved ? 'var(--accent-emerald)' : 'var(--accent-rose)'}`,
+                          display: 'flex', alignItems: 'center', gap: 6
+                        }}>
+                          {isApproved ? <CheckCircle size={13} /> : <XCircle size={13} />}
+                          {isApproved ? 'GATE APPROVED & SIGNED' : 'GATE REJECTED BY POLICY'}
+                        </div>
+                      </div>
+
+                      {/* Confidence Meter */}
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: 4 }}>
+                          <span>Model Confidence</span>
+                          <span style={{ fontWeight: 700, color: rec.confidence >= 0.70 ? 'var(--accent-emerald)' : 'var(--accent-rose)' }}>
+                            {Math.round(rec.confidence * 100)}% {rec.confidence < 0.70 ? '(Below 70% Gate Threshold)' : ''}
+                          </span>
+                        </div>
+                        <div style={{ width: '100%', height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
+                          <div style={{ 
+                            width: `${rec.confidence * 100}%`, height: '100%',
+                            background: rec.confidence >= 0.70 ? 'var(--accent-emerald)' : 'var(--accent-rose)',
+                            borderRadius: 2
+                          }} />
+                        </div>
+                      </div>
+
+                      {/* Reasoning Summary */}
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.45, margin: '0 0 10px 0' }}>
+                        {rec.reasoning_summary}
+                      </p>
+
+                      {/* Reason Codes */}
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                        {rec.reason_codes.map((code, cIdx) => (
+                          <span key={cIdx} style={{ 
+                            fontSize: '0.68rem', fontFamily: 'var(--font-mono)', background: 'rgba(168, 85, 247, 0.1)',
+                            border: '1px solid rgba(168, 85, 247, 0.3)', color: '#d8b4fe', padding: '1px 6px', borderRadius: 4
+                          }}>
+                            #{code}
+                          </span>
+                        ))}
+                      </div>
+
+                      {/* Deterministic Gate Rationale & Enacted Command */}
+                      <div style={{ padding: 10, background: 'rgba(0,0,0,0.3)', borderRadius: 6, border: '1px solid var(--border-subtle)', fontSize: '0.72rem' }}>
+                        <div style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Policy Gate Outcome:</div>
+                        <div style={{ color: isApproved ? '#a7f3d0' : '#fecdd3', fontWeight: 600 }}>{val.rationale}</div>
+                        {val.containment_command_id && (
+                          <div style={{ marginTop: 4, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                            Issued Command ID: {val.containment_command_id}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };

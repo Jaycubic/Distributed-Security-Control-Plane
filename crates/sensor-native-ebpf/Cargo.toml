@@ -1,0 +1,16 @@
+[package]
+name = "security-control-plane-sensor-native-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+# This is its own workspace — not part of the parent workspace
+[workspace]
+
+[dependencies]
+aya-ebpf = { version = "0.1" }
+aya-log-ebpf = { version = "0.1" }
+security-control-plane-sensor-native-common = { path = "../sensor-native-common" }
+
+[[bin]]
+name = "sensor-native-ebpf"
+path = "src/main.rs"

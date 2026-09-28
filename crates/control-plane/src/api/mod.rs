@@ -26,7 +26,12 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+mod advisory;
 mod sensors;
+use advisory::{
+    handle_analyze_incident, handle_get_mode, handle_get_recommendations, handle_set_mode,
+    handle_submit_recommendation,
+};
 use sensors::{handle_falco_ingest, handle_hubble_ingest, handle_tetragon_ingest};
 
 #[derive(Clone)]
@@ -37,6 +42,7 @@ pub struct AppState {
     pub correlator: Arc<CorrelationEngine>,
     pub policy_engine: Arc<CapabilityPolicyEngine>,
     pub containment_mgr: Arc<ContainmentManager>,
+    pub advisory_mgr: Arc<security_control_plane_engine::AdvisoryManager>,
 }
 
 #[derive(Serialize)]
@@ -133,19 +139,25 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/sensors/tetragon", post(handle_tetragon_ingest))
         .route("/api/v1/sensors/falco", post(handle_falco_ingest))
         .route("/api/v1/sensors/hubble", post(handle_hubble_ingest))
+        // Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B)
+        .route("/api/v1/mode", get(handle_get_mode).post(handle_set_mode))
+        .route("/api/v1/advisory/analyze/:id", post(handle_analyze_incident))
+        .route("/api/v1/advisory/recommendation", post(handle_submit_recommendation))
+        .route("/api/v1/advisory/recommendations", get(handle_get_recommendations))
         // WebSocket Real-time Stream
         .route("/api/v1/ws/events", get(handle_ws_events))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
-async fn handle_health() -> impl IntoResponse {
+async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
+    let mode = state.advisory_mgr.get_mode().await;
     Json(serde_json::json!({
         "status": "healthy",
         "service": "security-control-plane",
         "version": "0.1.0",
-        "mode": "Mode A (Deterministic)",
-        "phase": "Phase 5 - Kernel & Runtime Telemetry Adapters (Tetragon, Falco, Hubble)",
+        "mode": mode.as_str(),
+        "phase": "Phase 6 - Advisory Off-Path LLM Reasoning Service (Mode B)",
     }))
 }
 

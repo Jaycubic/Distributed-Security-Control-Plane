@@ -1,0 +1,10 @@
+[package]
+name = "security-control-plane-sensor-native-common"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+user = ["dep:aya"]
+
+[dependencies]
+aya = { version = "0.13", optional = true }

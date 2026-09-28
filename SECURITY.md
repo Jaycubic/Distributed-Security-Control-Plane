@@ -1,15 +1,18 @@
 # Security Policy
 
-## 1. Supported Versions
+### 1. Supported Versions
 
 Security updates and vulnerability patches are applied to the active development branch and the latest tagged releases.
 
-| Version | Supported          | Status                                      |
-| ------- | ------------------ | ------------------------------------------- |
-| 0.3.x   | :white_check_mark: | Active Development (Phase 3 — Correlation)  |
-| 0.2.x   | :white_check_mark: | Maintained (Phase 2 — Detection Engine)     |
-| 0.1.x   | :white_check_mark: | Maintained (Phase 1 — Core Architecture)    |
-| < 0.1   | :x:                | Unsupported                                 |
+| Version | Supported          | Status                                                  |
+| ------- | ------------------ | ------------------------------------------------------- |
+| 0.6.x   | :white_check_mark: | Active Development (Phase 6 — Native eBPF Sensor)       |
+| 0.5.x   | :white_check_mark: | Maintained (Phase 5 — External Sensor Adapters)         |
+| 0.4.x   | :white_check_mark: | Maintained (Phase 4 — Capability Policy & Containment)  |
+| 0.3.x   | :white_check_mark: | Maintained (Phase 3 — Identity Resolution & Correlation)|
+| 0.2.x   | :white_check_mark: | Maintained (Phase 2 — Detection Engine & Hot State)     |
+| 0.1.x   | :white_check_mark: | Maintained (Phase 1 — Core Architecture)                |
+| < 0.1   | :x:                | Unsupported                                             |
 
 ---
 
@@ -25,56 +28,38 @@ If you discover a security vulnerability, architectural weakness, or potential b
 2. **Use GitHub's private vulnerability reporting**:
    - Navigate to the repository's **Security** tab → **Advisories** → **Report a vulnerability**.
    - This creates a private, confidential thread visible only to maintainers.
-3. **Alternatively**, send a detailed report via email to the project maintainers (see the repository's GitHub profile for contact information).
+3. **Alternatively**, send a detailed report via email to the project maintainers.
 
 ### What to Include in Your Report
 
 | Field                    | Details                                                                        |
 | :----------------------- | :----------------------------------------------------------------------------- |
-| **Component Affected**   | Specify the crate or module (e.g., `crates/engine`, `crates/correlator`, `crates/control-plane`, `crates/agent-sdk`, `crates/common`, or `frontend`). |
+| **Component Affected**   | Specify the crate or module (e.g., `crates/sensor-native`, `crates/engine`, `crates/correlator`, `crates/control-plane`, `crates/agent-sdk`, `crates/common`). |
 | **Severity Estimate**    | Your assessment: Critical / High / Medium / Low.                               |
 | **Reproduction Steps**   | Step-by-step instructions or a proof-of-concept payload.                       |
 | **Impact Assessment**    | Potential impact on application availability, containment integrity, data confidentiality, or trust boundaries. |
 | **Affected Versions**    | Which version(s) are affected, if known.                                       |
 | **Suggested Fix**        | Optional: your recommended remediation approach.                               |
 
-### Disclosure Timeline
-
-| Stage                    | Target Timeframe                                         |
-| :----------------------- | :------------------------------------------------------- |
-| **Acknowledgment**       | Within **48 hours** of receiving the report.             |
-| **Triage & Reproduction**| Within **5 business days**.                              |
-| **Fix Development**      | Severity-dependent (Critical: 7 days, High: 14 days).   |
-| **Coordinated Disclosure** | Fix released before or simultaneously with public advisory. Reporter is credited unless anonymity is requested. |
-
-### Safe Harbor
-
-We consider security research conducted in good faith to be authorized. We will not pursue legal action against researchers who:
-
-- Make a good-faith effort to avoid privacy violations, data destruction, and service disruption.
-- Only interact with accounts they own or have explicit permission to test.
-- Report vulnerabilities through the channels described above.
-- Allow reasonable time for remediation before any public disclosure.
-
 ---
 
 ## 3. Threat Model & Root of Trust Boundaries
 
-The system is designed with explicit trust boundaries to ensure that a compromise of any single sensor, application, or model cannot compromise the entire control plane:
+The system is designed with explicit trust boundaries to ensure that a compromise of any single sensor, application, or model cannot compromise the control plane:
 
 ```text
        UNTRUSTED INPUTS                  ROOT OF TRUST                CONSUMERS
   ┌─────────────────────────┐     ┌─────────────────────────┐     ┌──────────────┐
   │  Application Telemetry  │ ──► │                         │ ──► │  Dashboard   │
   ├─────────────────────────┤     │   Deterministic Rust    │     └──────────────┘
-  │  Tetragon Kernel Feed   │ ──► │      Policy Engine      │     ┌──────────────┐
-  ├─────────────────────────┤     │                         │ ──► │ Local Agents │
-  │  Falco Syscall Alerts   │ ──► │  (Validates, Authorizes,│     │ (Containment)│
-  ├─────────────────────────┤     │   Signs All Commands)   │     └──────────────┘
-  │  Hubble Flow Telemetry  │ ──► │                         │
-  └─────────────────────────┘     └────────────┬────────────┘
-                                               │
-                                 Strict Schema & Policy Gate
+  │  Native eBPF Sensor     │ ──► │      Policy Engine      │     ┌──────────────┐
+  │ (execve, connect, bind) │     │                         │ ──► │ Local Agents │
+  ├─────────────────────────┤     │  (Validates, Authorizes,│     │ (Containment)│
+  │ External Sensors        │ ──► │   Signs All Commands)   │     └──────────────┘
+  │ (Tetragon/Falco/Hubble) │     │                         │     ┌──────────────┐
+  └─────────────────────────┘     └────────────┬────────────┘ ──► │ OS Enforcers │
+                                               │                  │(nftables/XDP)│
+                                  Strict Schema & Policy Gate     └──────────────┘
                                                │
                                   ┌────────────▼────────────┐
                                   │   Off-Path LLM Worker   │
@@ -82,13 +67,18 @@ The system is designed with explicit trust boundaries to ensure that a compromis
                                   └─────────────────────────┘
 ```
 
-### Core Security Invariants
+### Core Security Invariants (Master Architecture v3)
 
-1. **Telemetry is Untrusted Input**: All incoming events from application agents, Tetragon, Falco, and Hubble are strictly validated for payload size, timestamp skew, and format before entering the event stream.
-
-2. **Deterministic Engine is Root of Trust**: The Rust policy engine alone makes binding containment decisions. The LLM worker and the frontend dashboard sit **outside** the root of trust and have zero administrative execution authority.
-
-3. **Signed Containment Commands**: All agent response actions (`REVOKE_SESSION`, `THROTTLE_ACTOR`, `BLOCK_NETWORK`, `ISOLATE_SERVICE`) are cryptographically signed with Ed25519, carrying a mandatory expiration timestamp (TTL) and rollback recipe.
+1. **Zero Request-Path Coupling**: Normal application requests (`Client -> App -> Response`) must never synchronously wait for security ingestion, correlation, detection, or policy evaluation.
+2. **Deterministic Core as Root of Trust**: The deterministic Rust capability policy engine alone makes binding containment decisions. LLM/AI workers have zero direct execution authority.
+3. **Cryptographically Signed Containment**: All containment commands are Ed25519-signed with mandatory TTLs, sequence IDs, and replay protection.
+4. **Universal Normalization**: Every sensor (native eBPF, external adapters, application emitters) normalizes to canonical `SecurityEvent`.
+5. **Absolute DENY Precedence**: In the capability policy engine, `DENY` strictly takes precedence over `ALLOW`.
+6. **Graceful Fallback Resilience**: The control plane must survive Redis/PostgreSQL outages; `MemoryHotState` and in-memory streams serve as resilient fallbacks.
+7. **No Panic in Production**: Zero `unwrap()` in production execution paths; errors must be handled gracefully with `?`, `match`, or structured error types.
+8. **Structured Observability**: Tracing only (`tracing::info!`, `warn!`, `error!`); no raw `println!` in production code.
+9. **Separated eBPF Compilation**: Standard `cargo build` produces a working binary on any platform without requiring an eBPF toolchain.
+10. **Non-Privileged Testability**: Every phase includes unit tests and integration tests that run without root privileges.timestamp (TTL) and rollback recipe.
 
 4. **Out-of-Band Application Resilience**: Normal application traffic (`Client -> App -> Response`) never synchronously blocks on the control plane. In the event of a security controller outage, protected applications continue serving normal requests uninterrupted.
 

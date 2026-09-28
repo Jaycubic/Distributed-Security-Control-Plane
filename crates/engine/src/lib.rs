@@ -1,3 +1,4 @@
+pub mod advisory;
 pub mod containment;
 pub mod evaluator;
 pub mod incident;
@@ -5,6 +6,7 @@ pub mod policy;
 pub mod rules;
 pub mod state;
 
+pub use advisory::{AdvisoryManager, AdvisoryPolicyGate};
 pub use containment::{ContainmentError, ContainmentManager};
 pub use evaluator::RuleEngine;
 pub use incident::{Incident, IncidentStatus, SecuritySignal};
@@ -23,6 +25,7 @@ mod tests {
         ActionContext, ActorContext, SecurityEvent, SensorMetadata, SensorType, SourceContext,
         Severity,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -168,5 +171,121 @@ mod tests {
         assert_eq!(incidents.len(), 1);
         assert_eq!(incidents[0].severity, Severity::Critical);
         assert_eq!(incidents[0].risk_score, 50);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_advisory_policy_gate_confidence_and_deny_precedence() {
+        use security_control_plane_common::{
+            AdvisoryRecommendation, ContainmentActionType, ControlPlaneMode, DecisionOutcome,
+            PolicyBundle, PolicyRule, ThreatClassification,
+        };
+
+        let policy_engine = Arc::new(CapabilityPolicyEngine::new());
+        // Configure policy bundle with explicit DENY on /bin/sh and protected auth-service
+        let bundle = PolicyBundle {
+            policy_id: "test-policy-v1".into(),
+            version: 1,
+            target_app: "*".into(),
+            description: "Test policy with deny rules".into(),
+            allow: vec![PolicyRule {
+                capability: "session.revoke".into(),
+                scope: "*".into(),
+                description: Some("Allow revoking sessions".into()),
+            }],
+            deny: vec![
+                PolicyRule {
+                    capability: "service.isolate".into(),
+                    scope: "auth-service".into(),
+                    description: Some("Deny isolating critical auth service".into()),
+                },
+                PolicyRule {
+                    capability: "process.execute".into(),
+                    scope: "/bin/sh".into(),
+                    description: Some("Deny shell".into()),
+                },
+            ],
+            default_allow: false,
+        };
+        policy_engine.add_bundle(bundle).await;
+
+        let containment_mgr = Arc::new(ContainmentManager::with_random_keypair());
+        let advisory_mgr = AdvisoryManager::new(
+            Arc::new(AdvisoryPolicyGate::new(
+                Arc::clone(&policy_engine),
+                Arc::clone(&containment_mgr),
+                0.70,
+            )),
+            ControlPlaneMode::ModeA,
+            "http://localhost:8000",
+        );
+
+        // 1. Initial mode should be Mode A
+        assert_eq!(advisory_mgr.get_mode().await, ControlPlaneMode::ModeA);
+        assert!(!advisory_mgr.is_mode_b().await);
+
+        // Switch to Mode B
+        advisory_mgr.set_mode(ControlPlaneMode::ModeB).await;
+        assert_eq!(advisory_mgr.get_mode().await, ControlPlaneMode::ModeB);
+        assert!(advisory_mgr.is_mode_b().await);
+
+        // 2. Low confidence recommendation (< 0.70) must be REJECTED
+        let low_conf_rec = AdvisoryRecommendation::new(
+            Uuid::new_v4(),
+            "user:test-user",
+            "billing-app",
+            ThreatClassification::Suspicious,
+            0.55, // below 0.70
+            vec!["LOW_CONFIDENCE_SIGNAL".into()],
+            "Uncertain signal",
+            ContainmentActionType::RevokeSession,
+            Some("session.revoke".into()),
+            HashMap::new(),
+            300,
+            "mock-llm",
+        );
+        let res1 = advisory_mgr.validate_and_enact(low_conf_rec).await;
+        assert!(!res1.is_authorized);
+        assert_eq!(res1.decision, DecisionOutcome::Deny);
+        assert!(res1.rationale.contains("safety threshold"));
+
+        // 3. Recommendation violating explicit DENY rule must be REJECTED
+        let deny_rec = AdvisoryRecommendation::new(
+            Uuid::new_v4(),
+            "auth-service",
+            "auth-service",
+            ThreatClassification::Malicious,
+            0.95,
+            vec!["ANOMALOUS_BEHAVIOR".into()],
+            "Isolate compromised auth service",
+            ContainmentActionType::IsolateService,
+            Some("service.isolate".into()),
+            HashMap::new(),
+            600,
+            "mock-llm",
+        );
+        let res2 = advisory_mgr.validate_and_enact(deny_rec).await;
+        assert!(!res2.is_authorized);
+        assert_eq!(res2.decision, DecisionOutcome::Deny);
+        assert!(res2.rationale.contains("REJECTED"));
+
+        // 4. Recommendation authorized by policy must be APPROVED and signed
+        let allow_rec = AdvisoryRecommendation::new(
+            Uuid::new_v4(),
+            "user:malicious-actor",
+            "billing-app",
+            ThreatClassification::Malicious,
+            0.92,
+            vec!["CREDENTIAL_STUFFING".into()],
+            "High confidence credential stuffing",
+            ContainmentActionType::RevokeSession,
+            Some("session.revoke".into()),
+            HashMap::new(),
+            300,
+            "mock-llm",
+        );
+        let res3 = advisory_mgr.validate_and_enact(allow_rec).await;
+        assert!(res3.is_authorized);
+        assert_eq!(res3.decision, DecisionOutcome::Allow);
+        assert!(res3.containment_command_id.is_some());
     }
 }

@@ -39,6 +39,7 @@ pub fn infer_capabilities(event: &SecurityEvent) -> Vec<CapabilityType> {
     if event.source.process_name.is_some()
         || event.event_type == "kernel.process_exec"
         || event.source.sensor.sensor_type == security_control_plane_common::SensorType::Tetragon
+        || event.source.sensor.sensor_type == security_control_plane_common::SensorType::NativeSensor
     {
         caps.push(CapabilityType::ProcessExecute);
     }

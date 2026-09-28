@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Low,
@@ -21,6 +21,7 @@ pub enum SensorType {
     Hubble,
     Network,
     System,
+    NativeSensor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
