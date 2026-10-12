@@ -47,6 +47,8 @@ Different sensors expose different schemas. A canonical event model allows heter
 Sensor → Raw Event → Validation / Normalization → Canonical Security Event
 ```
 
+The field-by-field reference for the canonical event, including which fields are required versus optional, the source metadata and identity dimensions, the timestamp skew limits, and where each sensor adapter lives, is in the [canonical event schema reference](CANONICAL-EVENT-SCHEMA.md).
+
 ## Identity Resolution and Correlation
 Events may identify the same activity through different dimensions such as user, session, IP, application, container, and process. Identity resolution connects these dimensions so the correlation engine can recognize activity that crosses service boundaries.
 
