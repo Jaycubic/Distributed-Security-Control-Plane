@@ -1,0 +1,16 @@
+{
+  "uuid": "9f2c77d8-1a3e-4b9c-8d0a-77e0f1c2d345",
+  "time": "2026-09-20T12:03:30Z",
+  "rule": "Sensitive file access",
+  "priority": "Notice",
+  "output": "Notice on access to a sensitive file (user=deployer container_id=cc01aa22 proc=/usr/bin/cat path=/etc/shadow)",
+  "output_fields": {
+    "container.id": "cc01aa22",
+    "container.name": "auth-service",
+    "proc.name": "cat",
+    "proc.pid": 1204,
+    "proc.cmdline": "cat /etc/shadow",
+    "user.name": "deployer"
+  },
+  "source": "syscall"
+}
