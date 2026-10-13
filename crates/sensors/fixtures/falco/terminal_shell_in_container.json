@@ -1,0 +1,18 @@
+{
+  "uuid": "4c45a6c1-5c3b-483d-9be2-44a69b764264",
+  "time": "2026-09-20T12:01:00Z",
+  "rule": "Terminal shell in container",
+  "priority": "Critical",
+  "output": "A shell was spawned in container (user=root container_id=b43f9a12c cmdline=sh -i)",
+  "output_fields": {
+    "container.id": "b43f9a12c",
+    "container.name": "billing-app",
+    "proc.name": "sh",
+    "proc.pid": 2841,
+    "proc.cmdline": "sh -i",
+    "user.name": "root",
+    "fd.rip": "198.51.100.200",
+    "fd.rport": 443
+  },
+  "source": "syscall"
+}
