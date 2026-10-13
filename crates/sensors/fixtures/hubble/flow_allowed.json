@@ -1,0 +1,22 @@
+{
+  "flow": {
+    "time": "2026-09-20T12:04:15Z",
+    "verdict": "ALLOWED",
+    "IP": {
+      "source": "10.0.2.10",
+      "destination": "10.0.3.20"
+    },
+    "l4": {
+      "UDP": {
+        "source_port": 53000,
+        "destination_port": 53
+      }
+    },
+    "source": {
+      "labels": ["k8s:app=payments-service", "k8s:namespace=prod"],
+      "workloads": [{ "name": "payments-service", "kind": "Deployment" }]
+    },
+    "traffic_direction": "EGRESS"
+  },
+  "node_name": "worker-k8s-02"
+}
