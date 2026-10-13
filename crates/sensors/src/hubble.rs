@@ -218,4 +218,67 @@ mod tests {
         assert!(event.is_security_significant);
         assert!(!event.action.as_ref().unwrap().is_success);
     }
+
+    /// Fixture-backed schema-preservation check for a `DROPPED` flow: the
+    /// service, endpoint, protocol, and flow context the adapter surfaces from
+    /// a raw Hubble flow log survive as the canonical, typed fields (invariant
+    /// #3 — preserve sensor semantics).
+    #[test]
+    fn schema_preserved_for_fixture_dropped_flow() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/hubble/flow_dropped.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let event = HubbleAdapter::parse_event(&raw).expect("parse fixture");
+
+        // Service resolution: no labels, so the source workload name wins.
+        assert_eq!(event.app_id, "billing-service");
+        assert_eq!(event.event_type, "network.hubble.dropped");
+        assert_eq!(event.severity, Severity::High);
+        assert!(event.is_security_significant);
+
+        // Protocol + flow context become the process label and the action.
+        assert_eq!(event.source.sensor.sensor_type, SensorType::Hubble);
+        assert_eq!(event.source.sensor.raw_event_type, "flow_DROPPED");
+        assert_eq!(event.source.sensor.sensor_id.as_deref(), Some("worker-k8s-01"));
+        assert_eq!(event.source.process_name.as_deref(), Some("TCP:EGRESS"));
+        assert_eq!(event.source.ip.as_deref(), Some("10.0.1.50"));
+        assert_eq!(event.source.port, Some(54321));
+
+        // Endpoint = destination IP:port, verdict + reason ride in operation.
+        let action = event.action.as_ref().unwrap();
+        assert_eq!(action.endpoint.as_deref(), Some("198.51.100.200:443"));
+        assert_eq!(action.method.as_deref(), Some("EGRESS"));
+        assert_eq!(action.operation.as_deref(), Some("DROPPED: POLICY_DENIED (TCP)"));
+        assert!(!action.is_success);
+
+        // The raw flow is retained for forensics.
+        let payload = event.source.sensor.raw_payload.as_ref().unwrap();
+        assert_eq!(payload["flow"]["IP"]["destination"], "198.51.100.200");
+    }
+
+    /// A `ALLOWED` UDP flow is low-severity and non-significant, and its
+    /// service resolves from the `k8s:app=` label (the label path, distinct
+    /// from the workload path exercised above).
+    #[test]
+    fn schema_preserved_for_fixture_allowed_flow() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/hubble/flow_allowed.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let event = HubbleAdapter::parse_event(&raw).expect("parse fixture");
+
+        // Service resolution: `k8s:app=payments-service` label wins over the workload.
+        assert_eq!(event.app_id, "payments-service");
+        assert_eq!(event.event_type, "network.hubble.allowed");
+        assert_eq!(event.severity, Severity::Low);
+        assert!(!event.is_security_significant);
+
+        // UDP protocol drives the process label; endpoint is the resolved dst:port.
+        assert_eq!(event.source.process_name.as_deref(), Some("UDP:EGRESS"));
+        assert_eq!(event.source.port, Some(53000));
+        let action = event.action.as_ref().unwrap();
+        assert_eq!(action.endpoint.as_deref(), Some("10.0.3.20:53"));
+        assert!(action.is_success, "an allowed flow is a success");
+    }
 }

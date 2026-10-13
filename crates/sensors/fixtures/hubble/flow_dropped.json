@@ -1,0 +1,23 @@
+{
+  "flow": {
+    "time": "2026-09-20T12:02:00Z",
+    "verdict": "DROPPED",
+    "drop_reason_desc": "POLICY_DENIED",
+    "IP": {
+      "source": "10.0.1.50",
+      "destination": "198.51.100.200"
+    },
+    "l4": {
+      "TCP": {
+        "source_port": 54321,
+        "destination_port": 443
+      }
+    },
+    "source": {
+      "pod_name": "billing-service-789d-abc",
+      "workloads": [{ "name": "billing-service", "kind": "Deployment" }]
+    },
+    "traffic_direction": "EGRESS"
+  },
+  "node_name": "worker-k8s-01"
+}
