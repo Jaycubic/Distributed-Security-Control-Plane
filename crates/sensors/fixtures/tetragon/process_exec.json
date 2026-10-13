@@ -1,0 +1,21 @@
+{
+  "process_exec": {
+    "process": {
+      "exec_id": "b3JnL2FwcC0xMjM=",
+      "pid": 4821,
+      "uid": 0,
+      "binary": "/bin/sh",
+      "arguments": "-i",
+      "pod": {
+        "namespace": "prod",
+        "name": "billing-deployment-64d8f-xyz12",
+        "container": {
+          "id": "containerd://a83f9104c99e",
+          "name": "billing-app"
+        }
+      }
+    }
+  },
+  "node_name": "worker-k8s-01",
+  "time": "2026-09-20T12:00:00Z"
+}
