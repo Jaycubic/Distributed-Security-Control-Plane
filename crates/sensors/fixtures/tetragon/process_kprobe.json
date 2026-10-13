@@ -1,0 +1,19 @@
+{
+  "process_kprobe": {
+    "function_name": "sys_enter_connect",
+    "process": {
+      "pid": 5012,
+      "binary": "/usr/bin/curl",
+      "pod": {
+        "namespace": "prod",
+        "name": "crm-app",
+        "container": {
+          "id": "containerd://bb8812c",
+          "name": "crm-app"
+        }
+      }
+    }
+  },
+  "node_name": "worker-k8s-02",
+  "time": "2026-09-20T12:05:00Z"
+}
