@@ -182,4 +182,64 @@ mod tests {
         assert_eq!(event.source.port, Some(443));
         assert!(event.is_security_significant);
     }
+
+    /// Fixture-backed schema-preservation check: load a representative Falco
+    /// alert from `fixtures/falco/` and assert the raw `output_fields` survive as
+    /// the canonical, typed fields the control plane reads (invariant #3 —
+    /// preserve sensor semantics). A Critical-priority alert maps to
+    /// `Severity::Critical` and is marked significant.
+    #[test]
+    fn schema_preserved_for_fixture_critical_alert() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/falco/terminal_shell_in_container.json"
+        );
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let event = FalcoAdapter::parse_event(&raw).expect("parse fixture");
+
+        // The rule name becomes the event-type suffix.
+        assert_eq!(event.event_type, "runtime.falco.terminal_shell_in_container");
+        assert_eq!(event.severity, Severity::Critical);
+        assert!(event.is_security_significant);
+
+        // Identity and provenance carried through from the raw alert.
+        assert_eq!(event.app_id, "billing-app");
+        assert_eq!(event.source.sensor.sensor_type, SensorType::Falco);
+        assert_eq!(event.source.sensor.raw_event_type, "rule_alert");
+        assert_eq!(event.source.container_id.as_deref(), Some("b43f9a12c"));
+        assert_eq!(event.source.pid, Some(2841));
+        assert_eq!(event.source.process_name.as_deref(), Some("sh"));
+        assert_eq!(event.source.ip.as_deref(), Some("198.51.100.200"));
+        assert_eq!(event.source.port, Some(443));
+        assert_eq!(event.actor.as_ref().unwrap().user_id.as_deref(), Some("root"));
+        assert_eq!(event.action.as_ref().unwrap().operation.as_deref(), Some("Terminal shell in container"));
+
+        // The raw payload is retained for forensics.
+        let payload = event.source.sensor.raw_payload.as_ref().unwrap();
+        assert_eq!(payload["output_fields"]["proc.name"], "sh");
+    }
+
+    /// A lower-priority alert (Falco `Notice`) maps to `Severity::Medium` and is
+    /// still significant, with no network fields present.
+    #[test]
+    fn schema_preserved_for_fixture_notice_alert() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/falco/sensitive_file_access.json"
+        );
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let event = FalcoAdapter::parse_event(&raw).expect("parse fixture");
+        assert_eq!(event.event_type, "runtime.falco.sensitive_file_access");
+        assert_eq!(event.severity, Severity::Medium);
+        assert!(event.is_security_significant);
+        assert_eq!(event.app_id, "auth-service");
+        assert_eq!(event.source.ip, None, "no network fields on this alert");
+        // A non-root user.name still yields an actor, just with no role.
+        assert_eq!(event.actor.as_ref().unwrap().user_id.as_deref(), Some("deployer"));
+        assert_eq!(event.actor.as_ref().unwrap().role, None);
+    }
 }

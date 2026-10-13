@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Documented Falco telemetry examples: representative Critical and Notice alert fixtures under `crates/sensors/fixtures/falco/`, a raw-field-to-canonical mapping page (`docs/FALCO-EXAMPLES.md`), and fixture-backed schema-preservation tests (`#15`).
+
 All notable project changes are documented here.
 
 ## [0.3.0] — Identity, Correlation & Security Context
