@@ -265,6 +265,7 @@ python benchmarks/measure_overhead.py
 
 - [Architecture Overview](docs/ARCHITECTURE.md)
 - [Threat Model & Known Limitations](THREAT_MODEL.md)
+- [Canonical Telemetry Events](docs/CANONICAL-EVENTS.md)
 - [Use Cases](docs/USE-CASES.md)
 - [Detection & Correlation](docs/DETECTION-AND-CORRELATION.md)
 - [Changelog](CHANGELOG.md)
