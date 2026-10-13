@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Documented Tetragon telemetry examples: representative `process_exec` and `process_kprobe` fixtures under `crates/sensors/fixtures/tetragon/`, a raw-field-to-canonical mapping page (`docs/TETRAGON-EXAMPLES.md`), and fixture-backed schema-preservation tests (`#14`).
+
 All notable project changes are documented here.
 
 ## [0.3.0] — Identity, Correlation & Security Context
