@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Documented the deterministic sliding-window detection rules (`docs/DETECTION-RULES.md`): the six default engine rules with their exact thresholds, windows, and state keys, the risk-escalation ladder, and the hot-state primitive they run on, kept in lockstep with the implementation (`#2`).
+
 All notable project changes are documented here.
 
 ## [0.3.0] — Identity, Correlation & Security Context
