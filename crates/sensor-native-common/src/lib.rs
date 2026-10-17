@@ -61,7 +61,9 @@ pub struct KernelNetEvent {
     pub timestamp_ns: u64,
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 const _: () = assert!(core::mem::size_of::<KernelExecEvent>() % 8 == 0);
+#[allow(clippy::manual_is_multiple_of)]
 const _: () = assert!(core::mem::size_of::<KernelNetEvent>() % 8 == 0);
 
 // Safety: These types are plain-old-data with no padding gaps when laid out as declared.

@@ -16,8 +16,8 @@ A compromised application can forge, replay, or suppress its own security teleme
 The control plane currently **trusts all emitters**. There is no authentication, signing, or integrity verification on inbound telemetry from application middleware.
 
 ### Mitigations (Implemented & Remaining)
-- **Native Kernel eBPF Sensor (V3 prototype)**: The current sensor uses syscall tracepoints and kprobes and reads user-space exec filenames and connect/bind sockaddr pointers. This is not authoritative telemetry: TOCTOU races can make the observation differ from the data ultimately consumed by the kernel. The kprobe names are architecture-dependent, accept events lack peer addresses, and process attribution is PID-only with userspace `/proc` reads.
-- **V4 direction, not yet implemented**: Phase 6A audits the existing hooks and consumer; Phase 6B moves primary capture to LSM hooks where arguments are in kernel memory, with stable process identity. The tracepoint path remains explicitly degraded. LSM-BPF requires `CONFIG_BPF_LSM` and `bpf` in the active LSM list.
+- **Native Kernel eBPF Sensor (degraded fallback prototype)**: The current implementation uses syscall tracepoints and reads user-space exec filenames and connect/bind sockaddr pointers. Events are labeled `tracepoint_degraded` and carry `toctou_vulnerable`; accept-attempt events carry `no_inbound_accept` because the peer address is unavailable at syscall entry. The ring-buffer consumer now waits for fd readiness, but reserve failures are not counted, and process attribution still uses PID plus racy userspace `/proc` reads.
+- **V4 direction, not yet implemented**: Architecture-dependent kprobes have been removed, but Phase 6A remains blocked pending real-kernel attach, sample-event, ring-buffer wake, and CPU results. Phase 6B moves primary capture to LSM hooks where arguments are in kernel memory, with stable process identity. The tracepoint path remains explicitly degraded. LSM-BPF requires `CONFIG_BPF_LSM` and `bpf` in the active LSM list.
 - **External sensor adapters** (Tetragon, Falco, Hubble) provide Kubernetes container runtime visibility outside the application container.
 - **Remaining risk**: Inbound telemetry is not authenticated or signed by the control plane. A compromised or spoofed emitter can still forge or replay events; deployment-level authentication and network isolation are required. Syscall monitoring also misses activity performed exclusively through io_uring; V4 plans to report this blind spot rather than claim complete coverage.
 
@@ -81,7 +81,7 @@ The identity resolution layer merges heterogeneous identifiers (IP addresses, se
 
 ### Native eBPF Sensor (Phase 6)
 - **Kernel Verifier Safety**: All in-tree eBPF programs are verified at load time by the Linux kernel verifier, guaranteeing termination, memory safety, and no panics.
-- **Ring Buffer Drops**: The 256 KB eBPF ring buffer prioritizes kernel stability over guaranteed event delivery. Under pressure, reserve failures drop events; the current sensor does not count these losses or surface them as health events. The current userspace consumer polls with a 1 ms sleep when empty.
+- **Ring Buffer Drops**: The 256 KB eBPF ring buffer prioritizes kernel stability over guaranteed event delivery. The userspace consumer waits for fd readiness, but reserve failures still are not counted or surfaced as health events. This remains a known telemetry-loss risk pending Phase 6C.
 - **Privilege Requirements**: Loading requires root or `CAP_BPF + CAP_PERFMON` on Linux 5.15+ LTS with BTF (`/sys/kernel/btf/vmlinux`). Non-privileged environments gracefully fall back without crashing.
 
 ### Port Guardian (V3 Phase 7)

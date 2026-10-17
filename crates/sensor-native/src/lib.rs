@@ -13,7 +13,7 @@ pub use producer::NativeSensorProducer;
 mod tests {
     use super::normalizer::{null_terminated_str, KernelEventNormalizer};
     use security_control_plane_common::{SensorType, Severity};
-    use security_control_plane_sensor_native_common::KernelExecEvent;
+    use security_control_plane_sensor_native_common::{KernelExecEvent, KernelNetEvent};
 
     fn make_exec_event(filename: &str, uid: u32, pid: u32) -> KernelExecEvent {
         let mut ev = KernelExecEvent {
@@ -86,5 +86,51 @@ mod tests {
         assert!(event.metadata.contains_key("uid"));
         assert!(event.metadata.contains_key("filename"));
         assert!(event.metadata.contains_key("comm"));
+    }
+
+    #[test]
+    fn test_tracepoint_events_mark_degraded_capture_limitations() {
+        let normalizer = KernelEventNormalizer::new("test-host");
+        let event = normalizer.normalize_exec(&make_exec_event("/usr/bin/curl", 1000, 1111));
+
+        assert_eq!(
+            event.metadata["capture_backend"],
+            serde_json::Value::String("tracepoint_degraded".to_string())
+        );
+        assert_eq!(
+            event.metadata["limitations"],
+            serde_json::json!(["toctou_vulnerable"])
+        );
+    }
+
+    #[test]
+    fn test_accept_tracepoint_marks_missing_peer_address() {
+        let normalizer = KernelEventNormalizer::new("test-host");
+        let event = normalizer.normalize_net(&KernelNetEvent {
+            kind: 4,
+            pid: 1234,
+            ppid: 0,
+            uid: 1000,
+            gid: 1000,
+            comm: [0; 16],
+            sa_family: 0,
+            src_port: 0,
+            dst_port: 0,
+            _pad: [0; 2],
+            src_ip4: [0; 4],
+            dst_ip4: [0; 4],
+            src_ip6: [0; 16],
+            dst_ip6: [0; 16],
+            timestamp_ns: 0,
+        });
+
+        assert_eq!(
+            event.metadata["limitations"],
+            serde_json::json!(["no_inbound_accept"])
+        );
+        assert_eq!(
+            event.metadata["capture_backend"],
+            serde_json::Value::String("tracepoint_degraded".to_string())
+        );
     }
 }

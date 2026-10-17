@@ -70,6 +70,14 @@ impl KernelEventNormalizer {
             "filename".to_string(),
             serde_json::Value::String(filename.to_string()),
         );
+        event.metadata.insert(
+            "capture_backend".to_string(),
+            serde_json::Value::String("tracepoint_degraded".to_string()),
+        );
+        event.metadata.insert(
+            "limitations".to_string(),
+            serde_json::json!(["toctou_vulnerable"]),
+        );
 
         event
     }
@@ -139,6 +147,18 @@ impl KernelEventNormalizer {
             "ppid".to_string(),
             serde_json::Value::Number(serde_json::Number::from(ppid)),
         );
+        event.metadata.insert(
+            "capture_backend".to_string(),
+            serde_json::Value::String("tracepoint_degraded".to_string()),
+        );
+        let limitations = if kind == Some(KernelEventKind::Accept) {
+            serde_json::json!(["no_inbound_accept"])
+        } else {
+            serde_json::json!(["toctou_vulnerable"])
+        };
+        event
+            .metadata
+            .insert("limitations".to_string(), limitations);
 
         if kind == Some(KernelEventKind::Bind) {
             event.is_security_significant = true;
@@ -151,8 +171,20 @@ impl KernelEventNormalizer {
 /// Classify severity of an execve based on the binary path and user.
 fn classify_exec_severity(filename: &str, uid: u32) -> Severity {
     const HIGH_RISK_BINARIES: &[&str] = &[
-        "/bin/sh", "/bin/bash", "/usr/bin/bash", "/bin/dash", "nc", "ncat", "netcat", "socat",
-        "curl", "wget", "python", "python3", "perl", "ruby",
+        "/bin/sh",
+        "/bin/bash",
+        "/usr/bin/bash",
+        "/bin/dash",
+        "nc",
+        "ncat",
+        "netcat",
+        "socat",
+        "curl",
+        "wget",
+        "python",
+        "python3",
+        "perl",
+        "ruby",
     ];
     const CRITICAL_BINARIES: &[&str] = &[
         "sudo", "su", "passwd", "chpasswd", "visudo", "nsenter", "unshare", "ptrace",

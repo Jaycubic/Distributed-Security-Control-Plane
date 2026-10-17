@@ -93,7 +93,7 @@ The repository is under active development. **Architecture v4 supplements v3 and
 
 | Layer | Technology | Role |
 | :--- | :--- | :--- |
-| **Native Kernel Sensor** | Rust + `aya` (`sensor-native`) | V3 syscall tracepoint/kprobe prototype; user-pointer observations are TOCTOU-prone and not authoritative. V4 LSM capture and degraded health reporting remain gated on kernel validation. |
+| **Native Kernel Sensor** | Rust + `aya` (`sensor-native`) | Degraded syscall-tracepoint fallback; user-pointer observations remain TOCTOU-prone and non-authoritative. Ring-buffer consumption waits on fd readiness. V4 LSM capture and health reporting remain gated on kernel validation. |
 | **External Sensor Adapters** | eBPF (Cilium Tetragon, Falco, Hubble) | Ingests process execution, syscall alerts, and L3-L7 network flows from Kubernetes daemonsets via REST. |
 | **Core Security Engine** | Rust (`tokio`, Axum) | Event ingestion, sliding-window detection, in-memory correlation graph, Ed25519 signed containment. |
 | **API & Streaming** | Rust (Axum REST & WebSockets) | Telemetry ingestion endpoints and real-time event streaming to the dashboard. |
@@ -108,7 +108,7 @@ The repository is under active development. **Architecture v4 supplements v3 and
 
 V4 supersedes V3's Phase 6 capture path, Phase 7 scan-detection design, and Phase 8 enforcement design:
 
-- **Phase 6:** The current sensor reads syscall arguments from user memory in eBPF and uses `sys_connect`/`sys_bind`/`sys_accept4` kprobes. This is vulnerable to TOCTOU mismatches, can attach incorrectly across kernel architectures, does not capture the accepted peer, and does not report stable `(pid, start_time)` identity. It is not LSM capture and must be treated as degraded until V4 Phases 6A–6D are accepted.
+- **Phase 6:** The current fallback reads user arguments through syscall tracepoints and labels events `tracepoint_degraded`; TOCTOU mismatches remain possible, accepted-peer addresses are unavailable, and process identity is still PID-only with userspace `/proc` reads. Architecture-dependent kprobes have been removed and ring-buffer consumption waits for fd readiness. Kernel attachment, event delivery, CPU usage, drop reporting, and V4 LSM capture remain unvalidated; do not treat these events as authoritative.
 - **Phase 7:** The current Port Guardian detects patterns from local bind/connect/accept telemetry for registered ports. It does not observe ingress SYNs to closed ports, discover/reconcile existing listeners, or require service approval. V4 Phases 7A–7C replace these assumptions.
 - **Phase 8:** The current enforcer performs post-detection userspace actions. It does not synchronously deny exec/connect in LSM hooks, and its current nftables rollback/process-kill model does not satisfy V4's isolated, idempotent bouncer, expiry, lockout-prevention, and PID-reuse requirements.
 - **V4 validation is not complete:** No real-kernel Phase 6A audit, LSM lab run, or V4 acceptance test has been recorded. Do not treat a successful Windows workspace build/test as evidence for kernel behavior.
@@ -145,9 +145,9 @@ The platform is engineered systematically across twelve explicit phases:
   - Normalization of raw eBPF/syscall/flow telemetry into canonical `SecurityEvent` with full raw payload preservation (Sensor Fidelity Invariant).
   - High-confidence kernel detection (container shell spawn, syscall anomalies, dropped network egress).
 - [ ] **Phase 6: Native eBPF Sensor — V3 prototype present; V4 hardening required**
-  - In-tree eBPF programs for Linux 5.15+ LTS kernel: `sys_enter_execve` tracepoint and `sys_connect`, `sys_bind`, `sys_accept4` kprobes.
-  - 256 KB non-blocking kernel ring buffer (`EVENTS`).
-  - These syscall-argument probes are TOCTOU-prone and do not establish a trustworthy, complete view of kernel activity. Replace/label them per V4 Phases 6A–6D before relying on them.
+  - In-tree fallback uses `sys_enter_execve`, `sys_enter_connect`, `sys_enter_bind`, and `sys_enter_accept4` syscall tracepoints; architecture-dependent kprobes have been removed.
+  - The 256 KB ring-buffer consumer waits for fd readiness. Tracepoint events are labeled `tracepoint_degraded`; user-pointer reads remain TOCTOU-prone, and accept attempts have no peer address.
+  - Linux hook attachment, event delivery, CPU usage, drop reporting, and V4 LSM capture remain unvalidated; do not rely on the sensor as authoritative telemetry.
 - [ ] **Phase 7: Port Guardian — V3 prototype present; V4 discovery and ingress sensing required**
   - Real-time server port ownership registry updated by `kernel.net.bind` events.
   - Existing connection-based detections do not see ingress SYN scans of closed ports. V4 replaces scan detection with TC ingress aggregation and adds an approved service lifecycle.

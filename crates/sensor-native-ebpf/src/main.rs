@@ -3,12 +3,12 @@
 
 use aya_ebpf::{
     helpers::{
-        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
-        bpf_ktime_get_ns, bpf_probe_read_user_str_bytes,
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+        bpf_probe_read_user_str_bytes,
     },
-    macros::{kprobe, map, tracepoint},
+    macros::{map, tracepoint},
     maps::RingBuf,
-    programs::{ProbeContext, TracePointContext},
+    programs::TracePointContext,
     EbpfContext,
 };
 use aya_log_ebpf::info;
@@ -34,8 +34,10 @@ fn try_execve(ctx: TracePointContext) -> Result<i64, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
 
-    // Read the filename pointer from tracepoint args at offset 8 (kernel abi: filename)
-    let filename_ptr: u64 = unsafe { ctx.read_at(8).map_err(|_| 1i64)? };
+    // sys_enter tracepoints start with an 8-byte common header, followed by the
+    // syscall number and six arguments; execve filename is args[0] at byte 16.
+    // SAFETY: offset 16 is the first u64 syscall argument in the sys_enter ABI.
+    let filename_ptr: u64 = unsafe { ctx.read_at(16).map_err(|_| 1i64)? };
 
     let mut event = KernelExecEvent {
         kind: KernelEventKind::Execve as u32,
@@ -46,19 +48,22 @@ fn try_execve(ctx: TracePointContext) -> Result<i64, i64> {
         _pad: 0,
         comm: [0u8; 16],
         filename: [0u8; 256],
+        // SAFETY: this eBPF helper is valid in tracepoint programs.
         timestamp_ns: unsafe { bpf_ktime_get_ns() },
     };
 
     // Read comm (process name, max 15 chars)
+    // SAFETY: the helper writes at most the size of the fixed event buffer.
     let _ = bpf_get_current_comm(&mut event.comm);
 
     // Read filename from user memory — safe because filename_ptr comes from user ABI
-    let _ = unsafe {
-        bpf_probe_read_user_str_bytes(filename_ptr as *const u8, &mut event.filename)
-    };
+    // SAFETY: the helper validates the user pointer and bounds the copy to the buffer.
+    let _ =
+        unsafe { bpf_probe_read_user_str_bytes(filename_ptr as *const u8, &mut event.filename) };
 
     // Write to ring buffer — if ring buffer is full, the event is dropped (not blocked)
     if let Some(mut entry) = EVENTS.reserve::<KernelExecEvent>(0) {
+        // SAFETY: event has the exact type and size requested from reserve.
         unsafe { entry.write(event) };
         entry.submit(0);
     }
@@ -66,28 +71,30 @@ fn try_execve(ctx: TracePointContext) -> Result<i64, i64> {
     Ok(0)
 }
 
-/// kprobe on sys_connect: fires when a process initiates a network connection.
-/// Used for detecting outbound connections from server processes.
-#[kprobe]
-pub fn sys_connect(ctx: ProbeContext) -> u32 {
+/// Degraded syscall-tracepoint fallback. The sockaddr remains user memory and is
+/// therefore susceptible to TOCTOU races; the event must not be treated as authoritative.
+#[tracepoint]
+pub fn sys_enter_connect(ctx: TracePointContext) -> i64 {
     match try_connect(ctx) {
         Ok(ret) => ret,
-        Err(_) => 0,
+        Err(_) => 0i64,
     }
 }
 
-fn try_connect(ctx: ProbeContext) -> Result<u32, u32> {
+fn try_connect(ctx: TracePointContext) -> Result<i64, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
 
-    // ctx.arg(1) = struct sockaddr __user * uservaddr
-    let sockaddr_ptr: *const u8 = unsafe { ctx.arg(1).ok_or(1u32)? };
+    // With the 8-byte common header and 8-byte syscall number, connect's args[1]
+    // sockaddr pointer is at byte 24.
+    // SAFETY: offset 24 is connect(2)'s second argument in the sys_enter ABI.
+    let sockaddr_ptr: u64 = unsafe { ctx.read_at(24).map_err(|_| 1i64)? };
+    let sockaddr_ptr = sockaddr_ptr as *const u8;
 
     let mut sa_family: u16 = 0;
-    // Read sa_family (first 2 bytes of sockaddr)
+    // SAFETY: bpf_probe_read_user validates access to the user pointer.
     let _ = unsafe {
-        aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr as *const u16)
-            .map(|f| sa_family = f)
+        aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr as *const u16).map(|f| sa_family = f)
     };
 
     let mut event = KernelNetEvent {
@@ -105,18 +112,22 @@ fn try_connect(ctx: ProbeContext) -> Result<u32, u32> {
         dst_ip4: [0u8; 4],
         src_ip6: [0u8; 16],
         dst_ip6: [0u8; 16],
+        // SAFETY: this eBPF helper is valid in tracepoint programs.
         timestamp_ns: unsafe { bpf_ktime_get_ns() },
     };
 
+    // SAFETY: the helper writes at most the size of the fixed event buffer.
     let _ = bpf_get_current_comm(&mut event.comm);
 
     // AF_INET = 2
     if sa_family == 2 {
         // sockaddr_in: [sa_family: u16][sin_port: u16][sin_addr: u32]
+        // SAFETY: bpf_probe_read_user validates each read from the user pointer.
         let _ = unsafe {
             aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr.add(2) as *const u16)
                 .map(|p| event.dst_port = u16::from_be(p))
         };
+        // SAFETY: bpf_probe_read_user validates each read from the user pointer.
         let _ = unsafe {
             aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr.add(4) as *const [u8; 4])
                 .map(|a| event.dst_ip4 = a)
@@ -124,6 +135,7 @@ fn try_connect(ctx: ProbeContext) -> Result<u32, u32> {
     }
 
     if let Some(mut entry) = EVENTS.reserve::<KernelNetEvent>(0) {
+        // SAFETY: event has the exact type and size requested from reserve.
         unsafe { entry.write(event) };
         entry.submit(0);
     }
@@ -131,25 +143,29 @@ fn try_connect(ctx: ProbeContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-/// kprobe on sys_bind: fires when a process binds to a port.
-/// Critical for Port Guardian (Phase 7): records which process owns which port.
-#[kprobe]
-pub fn sys_bind(ctx: ProbeContext) -> u32 {
+/// Degraded syscall-tracepoint fallback. The sockaddr remains user memory and is
+/// therefore susceptible to TOCTOU races; the event must not be treated as authoritative.
+#[tracepoint]
+pub fn sys_enter_bind(ctx: TracePointContext) -> i64 {
     match try_bind(ctx) {
         Ok(ret) => ret,
-        Err(_) => 0,
+        Err(_) => 0i64,
     }
 }
 
-fn try_bind(ctx: ProbeContext) -> Result<u32, u32> {
+fn try_bind(ctx: TracePointContext) -> Result<i64, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
-    let sockaddr_ptr: *const u8 = unsafe { ctx.arg(1).ok_or(1u32)? };
+    // With the 8-byte common header and 8-byte syscall number, bind's args[1]
+    // sockaddr pointer is at byte 24.
+    // SAFETY: offset 24 is bind(2)'s second argument in the sys_enter ABI.
+    let sockaddr_ptr: u64 = unsafe { ctx.read_at(24).map_err(|_| 1i64)? };
+    let sockaddr_ptr = sockaddr_ptr as *const u8;
 
     let mut sa_family: u16 = 0;
+    // SAFETY: bpf_probe_read_user validates access to the user pointer.
     let _ = unsafe {
-        aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr as *const u16)
-            .map(|f| sa_family = f)
+        aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr as *const u16).map(|f| sa_family = f)
     };
 
     let mut event = KernelNetEvent {
@@ -167,16 +183,20 @@ fn try_bind(ctx: ProbeContext) -> Result<u32, u32> {
         dst_ip4: [0u8; 4],
         src_ip6: [0u8; 16],
         dst_ip6: [0u8; 16],
+        // SAFETY: this eBPF helper is valid in tracepoint programs.
         timestamp_ns: unsafe { bpf_ktime_get_ns() },
     };
 
+    // SAFETY: the helper writes at most the size of the fixed event buffer.
     let _ = bpf_get_current_comm(&mut event.comm);
 
     if sa_family == 2 {
+        // SAFETY: bpf_probe_read_user validates each read from the user pointer.
         let _ = unsafe {
             aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr.add(2) as *const u16)
                 .map(|p| event.dst_port = u16::from_be(p))
         };
+        // SAFETY: bpf_probe_read_user validates each read from the user pointer.
         let _ = unsafe {
             aya_ebpf::helpers::bpf_probe_read_user(sockaddr_ptr.add(4) as *const [u8; 4])
                 .map(|a| event.dst_ip4 = a)
@@ -184,6 +204,7 @@ fn try_bind(ctx: ProbeContext) -> Result<u32, u32> {
     }
 
     if let Some(mut entry) = EVENTS.reserve::<KernelNetEvent>(0) {
+        // SAFETY: event has the exact type and size requested from reserve.
         unsafe { entry.write(event) };
         entry.submit(0);
     }
@@ -191,9 +212,10 @@ fn try_bind(ctx: ProbeContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-/// kprobe on sys_accept4: fires when a listening process accepts a new connection.
-#[kprobe]
-pub fn sys_accept4(ctx: ProbeContext) -> u32 {
+/// Degraded tracepoint observation of accept attempts. The peer address is not
+/// available at syscall entry, so this event is explicitly marked incomplete.
+#[tracepoint]
+pub fn sys_enter_accept4(_ctx: TracePointContext) -> i64 {
     let pid_tgid = bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
 
@@ -212,17 +234,20 @@ pub fn sys_accept4(ctx: ProbeContext) -> u32 {
         dst_ip4: [0u8; 4],
         src_ip6: [0u8; 16],
         dst_ip6: [0u8; 16],
+        // SAFETY: this eBPF helper is valid in tracepoint programs.
         timestamp_ns: unsafe { bpf_ktime_get_ns() },
     };
 
+    // SAFETY: the helper writes at most the size of the fixed event buffer.
     let _ = bpf_get_current_comm(&mut event.comm);
 
     if let Some(mut entry) = EVENTS.reserve::<KernelNetEvent>(0) {
+        // SAFETY: event has the exact type and size requested from reserve.
         unsafe { entry.write(event) };
         entry.submit(0);
     }
 
-    0
+    0i64
 }
 
 #[panic_handler]
