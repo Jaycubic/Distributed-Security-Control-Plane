@@ -61,9 +61,29 @@ pub struct KernelNetEvent {
     pub timestamp_ns: u64,
 }
 
+const _: () = assert!(core::mem::size_of::<KernelExecEvent>() % 8 == 0);
+const _: () = assert!(core::mem::size_of::<KernelNetEvent>() % 8 == 0);
+
 // Safety: These types are plain-old-data with no padding gaps when laid out as declared.
 // Verified by compile-time size assertions in the userspace crate.
 #[cfg(all(feature = "user", target_os = "linux"))]
 unsafe impl aya::Pod for KernelExecEvent {}
 #[cfg(all(feature = "user", target_os = "linux"))]
 unsafe impl aya::Pod for KernelNetEvent {}
+
+#[cfg(test)]
+mod tests {
+    use super::{KernelExecEvent, KernelNetEvent};
+
+    #[test]
+    fn test_exec_event_layout_size_and_alignment() {
+        assert_eq!(core::mem::size_of::<KernelExecEvent>() % 8, 0);
+        assert_eq!(core::mem::align_of::<KernelExecEvent>(), 8);
+    }
+
+    #[test]
+    fn test_net_event_layout_size_and_alignment() {
+        assert_eq!(core::mem::size_of::<KernelNetEvent>() % 8, 0);
+        assert_eq!(core::mem::align_of::<KernelNetEvent>(), 8);
+    }
+}

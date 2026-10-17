@@ -13,12 +13,15 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use security_control_plane_common::{
-    validate_security_event, ContainmentActionType, PolicyBundle, SecurityEvent,
+    validate_security_event, ContainmentActionType, ContainmentStatus, PolicyBundle, SecurityEvent,
 };
 use security_control_plane_correlator::CorrelationEngine;
+use security_control_plane_enforcer::NativeEnforcer;
 use security_control_plane_engine::{
     CapabilityPolicyEngine, ContainmentManager, IncidentStatus, RuleEngine,
 };
+use security_control_plane_packet_inspector::PacketInspector;
+use security_control_plane_port_guardian::PortGuardian;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,6 +46,9 @@ pub struct AppState {
     pub policy_engine: Arc<CapabilityPolicyEngine>,
     pub containment_mgr: Arc<ContainmentManager>,
     pub advisory_mgr: Arc<security_control_plane_engine::AdvisoryManager>,
+    pub port_guardian: Arc<PortGuardian>,
+    pub native_enforcer: Option<Arc<NativeEnforcer>>,
+    pub packet_inspector: Arc<PacketInspector>,
 }
 
 #[derive(Serialize)]
@@ -110,44 +116,177 @@ pub struct RollbackContainmentRequest {
     pub reason: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct PacketPayloadRequest {
+    pub transport: String,
+    pub source_ip: std::net::IpAddr,
+    pub source_port: u16,
+    pub payload: Vec<u8>,
+}
+
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         // Telemetry & Metrics
-        .route("/api/v1/telemetry", get(handle_recent_events).post(handle_telemetry))
+        .route(
+            "/api/v1/telemetry",
+            get(handle_recent_events).post(handle_telemetry),
+        )
         .route("/api/v1/health", get(handle_health))
         .route("/api/v1/metrics", get(handle_metrics))
         .route("/api/v1/events/recent", get(handle_recent_events))
         // Incidents
         .route("/api/v1/incidents", get(handle_get_incidents))
         .route("/api/v1/incidents/:id", get(handle_get_incident_by_id))
-        .route("/api/v1/incidents/:id/status", post(handle_update_incident_status))
+        .route(
+            "/api/v1/incidents/:id/status",
+            post(handle_update_incident_status),
+        )
         // Correlation & Identity
         .route("/api/v1/entities", get(handle_get_entities))
         .route("/api/v1/entities/:id", get(handle_get_entity_by_id))
-        .route("/api/v1/correlation/graph", get(handle_get_correlation_graph))
+        .route(
+            "/api/v1/correlation/graph",
+            get(handle_get_correlation_graph),
+        )
         // Phase 4: Capability Policies
-        .route("/api/v1/policies", get(handle_get_policies).post(handle_create_policy))
-        .route("/api/v1/policies/:id", get(handle_get_policy_by_id).delete(handle_delete_policy))
+        .route(
+            "/api/v1/policies",
+            get(handle_get_policies).post(handle_create_policy),
+        )
+        .route(
+            "/api/v1/policies/:id",
+            get(handle_get_policy_by_id).delete(handle_delete_policy),
+        )
         .route("/api/v1/policies/evaluate", post(handle_evaluate_policy))
         .route("/api/v1/policies/simulate", post(handle_simulate_policy))
         // Phase 4: Graduated Containment & Signed Commands
-        .route("/api/v1/containment/commands", get(handle_get_containment_commands))
-        .route("/api/v1/containment/dispatch", post(handle_dispatch_containment))
-        .route("/api/v1/containment/:id/rollback", post(handle_rollback_containment))
-        .route("/api/v1/containment/public-key", get(handle_get_containment_public_key))
+        .route(
+            "/api/v1/containment/commands",
+            get(handle_get_containment_commands),
+        )
+        .route(
+            "/api/v1/containment/dispatch",
+            post(handle_dispatch_containment),
+        )
+        .route(
+            "/api/v1/containment/:id/rollback",
+            post(handle_rollback_containment),
+        )
+        .route(
+            "/api/v1/containment/public-key",
+            get(handle_get_containment_public_key),
+        )
         // Phase 5: Kernel & Runtime Sensor Telemetry
         .route("/api/v1/sensors/tetragon", post(handle_tetragon_ingest))
         .route("/api/v1/sensors/falco", post(handle_falco_ingest))
         .route("/api/v1/sensors/hubble", post(handle_hubble_ingest))
+        .route(
+            "/api/v1/port-guardian/bindings",
+            get(handle_get_port_bindings),
+        )
+        .route(
+            "/api/v1/sensors/packet-inspector",
+            post(handle_packet_inspector_ingest),
+        )
         // Phase 6: Advisory Off-Path LLM Reasoning Service (Mode B)
         .route("/api/v1/mode", get(handle_get_mode).post(handle_set_mode))
-        .route("/api/v1/advisory/analyze/:id", post(handle_analyze_incident))
-        .route("/api/v1/advisory/recommendation", post(handle_submit_recommendation))
-        .route("/api/v1/advisory/recommendations", get(handle_get_recommendations))
+        .route(
+            "/api/v1/advisory/analyze/:id",
+            post(handle_analyze_incident),
+        )
+        .route(
+            "/api/v1/advisory/recommendation",
+            post(handle_submit_recommendation),
+        )
+        .route(
+            "/api/v1/advisory/recommendations",
+            get(handle_get_recommendations),
+        )
         // WebSocket Real-time Stream
         .route("/api/v1/ws/events", get(handle_ws_events))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn handle_get_port_bindings(State(state): State<AppState>) -> impl IntoResponse {
+    match state.port_guardian.registry().get_bindings().await {
+        Ok(bindings) => (StatusCode::OK, Json(serde_json::json!(bindings))).into_response(),
+        Err(err) => {
+            error!(error = %err, "Failed to retrieve Port Guardian bindings");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_packet_inspector_ingest(
+    State(state): State<AppState>,
+    Json(payload): Json<PacketPayloadRequest>,
+) -> impl IntoResponse {
+    let inspected = match payload.transport.to_ascii_lowercase().as_str() {
+        "tcp" => state.packet_inspector.inspect_tcp_payload(
+            payload.source_ip,
+            payload.source_port,
+            &payload.payload,
+        ),
+        "udp" => state.packet_inspector.inspect_dns_query(
+            payload.source_ip,
+            payload.source_port,
+            &payload.payload,
+        ),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "transport must be tcp or udp" })),
+            )
+                .into_response()
+        }
+    };
+    let event = match inspected {
+        Ok(Some(event)) => event,
+        Ok(None) => return StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    if let Err(err) = validate_security_event(&event) {
+        error!(error = %err, "Packet inspector generated invalid canonical event");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Generated event failed validation" })),
+        )
+            .into_response();
+    }
+    if let Err(err) = state.stream.publish(&event).await {
+        error!(error = %err, event_id = %event.event_id, "Failed to publish packet inspection event");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Failed to publish inspected event" })),
+        )
+            .into_response();
+    }
+
+    let sink = Arc::clone(&state.durable_sink);
+    let event_to_persist = event.clone();
+    tokio::spawn(async move {
+        if let Err(err) = sink.save_batch(&[event_to_persist]).await {
+            error!(error = %err, "Failed to persist packet inspection event");
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "accepted", "event_id": event.event_id })),
+    )
+        .into_response()
 }
 
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
@@ -318,7 +457,11 @@ async fn handle_delete_policy(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if state.policy_engine.remove_bundle(&id).await {
-        (StatusCode::OK, Json(serde_json::json!({ "status": "deleted", "policy_id": id }))).into_response()
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "deleted", "policy_id": id })),
+        )
+            .into_response()
     } else {
         (
             StatusCode::NOT_FOUND,
@@ -337,7 +480,11 @@ async fn handle_evaluate_policy(
     let evidence = req.evidence_event_ids.unwrap_or_default();
 
     // Check if actor has active capability revocation
-    if state.containment_mgr.is_capability_revoked(&actor_entity, &req.capability).await {
+    if state
+        .containment_mgr
+        .is_capability_revoked(&actor_entity, &req.capability)
+        .await
+    {
         let decision = security_control_plane_common::PolicyDecision {
             decision_id: Uuid::new_v4(),
             who,
@@ -413,8 +560,17 @@ async fn handle_dispatch_containment(
     Json(req): Json<DispatchContainmentRequest>,
 ) -> impl IntoResponse {
     let action = ContainmentActionType::from_str_lossy(&req.action);
+    if action.as_str() != req.action.to_ascii_uppercase() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Unsupported containment action" })),
+        )
+            .into_response();
+    }
     let ttl = req.ttl_seconds.unwrap_or(300);
-    let recipe = req.rollback_recipe.unwrap_or_else(|| "AUTOMATED_ROLLBACK".into());
+    let recipe = req
+        .rollback_recipe
+        .unwrap_or_else(|| "AUTOMATED_ROLLBACK".into());
     let params = req.params.unwrap_or_default();
 
     let cmd = state
@@ -430,6 +586,48 @@ async fn handle_dispatch_containment(
         )
         .await;
 
+    if let Err(err) = state.durable_sink.save_containment_command(&cmd).await {
+        let _ = state
+            .containment_mgr
+            .rollback(cmd.command_id, "Containment audit persistence failed")
+            .await;
+        error!(error = %err, command_id = %cmd.command_id, "Failed to persist containment command");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response();
+    }
+
+    if let Some(enforcer) = &state.native_enforcer {
+        if matches!(
+            &cmd.action,
+            ContainmentActionType::NftablesBlock | ContainmentActionType::KillProcess
+        ) {
+            if let Err(err) = enforcer.execute(&cmd).await {
+                if let Ok(rolled_back) = state
+                    .containment_mgr
+                    .rollback(cmd.command_id, "Native enforcement failed")
+                    .await
+                {
+                    if let Err(persist_err) = state
+                        .durable_sink
+                        .save_containment_command(&rolled_back)
+                        .await
+                    {
+                        error!(error = %persist_err, command_id = %cmd.command_id, "Failed to persist containment rollback");
+                    }
+                }
+                error!(error = %err, command_id = %cmd.command_id, "Native containment execution failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": err.to_string() })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     (StatusCode::CREATED, Json(serde_json::json!(cmd))).into_response()
 }
 
@@ -438,9 +636,37 @@ async fn handle_rollback_containment(
     Path(id): Path<Uuid>,
     Json(req): Json<RollbackContainmentRequest>,
 ) -> impl IntoResponse {
-    let reason = req.reason.unwrap_or_else(|| "Operator manual rollback".into());
+    let reason = req
+        .reason
+        .unwrap_or_else(|| "Operator manual rollback".into());
+    if let Some(enforcer) = &state.native_enforcer {
+        if let Some(command) = state.containment_mgr.get_command(id).await {
+            if command.status == ContainmentStatus::Active
+                && command.action == ContainmentActionType::NftablesBlock
+            {
+                if let Err(err) = enforcer.rollback(&command).await {
+                    error!(error = %err, command_id = %id, "Native containment rollback failed");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": err.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     match state.containment_mgr.rollback(id, &reason).await {
-        Ok(cmd) => (StatusCode::OK, Json(serde_json::json!(cmd))).into_response(),
+        Ok(cmd) => {
+            if let Err(err) = state.durable_sink.save_containment_command(&cmd).await {
+                error!(error = %err, command_id = %id, "Failed to persist rolled-back containment command");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": err.to_string() })),
+                )
+                    .into_response();
+            }
+            (StatusCode::OK, Json(serde_json::json!(cmd))).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),

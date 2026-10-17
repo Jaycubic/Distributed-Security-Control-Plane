@@ -1,0 +1,10 @@
+[package]
+name = "security-control-plane-packet-inspector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+security-control-plane-common = { path = "../common" }
+serde_json = { workspace = true }
+httparse = { workspace = true }
+thiserror = { workspace = true }

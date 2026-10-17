@@ -6,7 +6,7 @@ Security updates and vulnerability patches are applied to the active development
 
 | Version | Supported          | Status                                                  |
 | ------- | ------------------ | ------------------------------------------------------- |
-| 0.6.x   | :white_check_mark: | Active Development (Phase 6 — Native eBPF Sensor)       |
+| 0.6.x   | :white_check_mark: | Active Development (V3 prototype; V4 hardening pending) |
 | 0.5.x   | :white_check_mark: | Maintained (Phase 5 — External Sensor Adapters)         |
 | 0.4.x   | :white_check_mark: | Maintained (Phase 4 — Capability Policy & Containment)  |
 | 0.3.x   | :white_check_mark: | Maintained (Phase 3 — Identity Resolution & Correlation)|
@@ -45,7 +45,7 @@ If you discover a security vulnerability, architectural weakness, or potential b
 
 ## 3. Threat Model & Root of Trust Boundaries
 
-The system is designed with explicit trust boundaries to ensure that a compromise of any single sensor, application, or model cannot compromise the control plane:
+The intended architecture uses explicit trust boundaries, but the current V3-era sensor and enforcer do not meet V4's capture-integrity or synchronous-deny requirements. These boundaries are not substitutes for API authentication, host isolation, or deployment hardening:
 
 ```text
        UNTRUSTED INPUTS                  ROOT OF TRUST                CONSUMERS
@@ -58,7 +58,7 @@ The system is designed with explicit trust boundaries to ensure that a compromis
   │ External Sensors        │ ──► │   Signs All Commands)   │     └──────────────┘
   │ (Tetragon/Falco/Hubble) │     │                         │     ┌──────────────┐
   └─────────────────────────┘     └────────────┬────────────┘ ──► │ OS Enforcers │
-                                               │                  │(nftables/XDP)│
+                                               │                  │(nftables/process)│
                                   Strict Schema & Policy Gate     └──────────────┘
                                                │
                                   ┌────────────▼────────────┐
@@ -67,18 +67,32 @@ The system is designed with explicit trust boundaries to ensure that a compromis
                                   └─────────────────────────┘
 ```
 
-### Core Security Invariants (Master Architecture v3)
+### Core Security Invariants (Architecture v4 supplements v3)
 
 1. **Zero Request-Path Coupling**: Normal application requests (`Client -> App -> Response`) must never synchronously wait for security ingestion, correlation, detection, or policy evaluation.
-2. **Deterministic Core as Root of Trust**: The deterministic Rust capability policy engine alone makes binding containment decisions. LLM/AI workers have zero direct execution authority.
+2. **Deterministic Core as Root of Trust**: The deterministic Rust policy engine is intended to make binding decisions. The existing V3 userspace enforcer is post-detection and is not synchronous prevention.
 3. **Cryptographically Signed Containment**: All containment commands are Ed25519-signed with mandatory TTLs, sequence IDs, and replay protection.
 4. **Universal Normalization**: Every sensor (native eBPF, external adapters, application emitters) normalizes to canonical `SecurityEvent`.
 5. **Absolute DENY Precedence**: In the capability policy engine, `DENY` strictly takes precedence over `ALLOW`.
-6. **Graceful Fallback Resilience**: The control plane must survive Redis/PostgreSQL outages; `MemoryHotState` and in-memory streams serve as resilient fallbacks.
+6. **Explicit Storage Guarantees**: Standalone mode persists events, incidents, and containment records in SQLite. Distributed mode can use Redis for hot state; PostgreSQL durable storage is not implemented, and in-memory fallback is not durable.
 7. **No Panic in Production**: Zero `unwrap()` in production execution paths; errors must be handled gracefully with `?`, `match`, or structured error types.
 8. **Structured Observability**: Tracing only (`tracing::info!`, `warn!`, `error!`); no raw `println!` in production code.
 9. **Separated eBPF Compilation**: Standard `cargo build` produces a working binary on any platform without requiring an eBPF toolchain.
-10. **Non-Privileged Testability**: Every phase includes unit tests and integration tests that run without root privileges.timestamp (TTL) and rollback recipe.
+10. **Non-Privileged Testability**: Portable parsers and most unit tests run without root privileges. Linux kernel capture and system enforcement require platform-specific integration validation.
+
+### Current Phase 6–8 limitations and V4 gates
+
+- **Capture is not TOCTOU-safe:** V3 eBPF programs read exec filenames and connect/bind sockaddr data through user pointers at syscall tracepoints/kprobes. These observations can differ from the data the kernel consumes. The `sys_connect`, `sys_bind`, and `sys_accept4` kprobe names are architecture-dependent; accepted-peer attribution is absent; process identity is PID-only. io_uring-only activity is not observed.
+- **No synchronous deny:** Native enforcement is opt-in with `NATIVE_ENFORCER=true`, but its actions run after detection. They do not prevent the syscall that generated the event.
+- **Unsafe process/firewall behavior remains:** The current backend uses PID-based `kill -9` and a shared nftables structure. PID reuse can target another process, broad rollback can disturb unrelated firewall state, and process termination is irreversible. Keep the enforcer disabled in production until V4's ProcessKey/pidfd and isolated, expiring bouncer design is implemented and validated.
+- V4 requires audit-first enforcement, explicit expiry, `never_block` protection, no automatic promotion, and fail-open detach behavior. The V3 enforcer does not currently satisfy that complete safety model.
+- The API/control plane must be isolated and authenticated at the deployment boundary. Do not expose telemetry or containment endpoints to untrusted networks; the application does not itself provide TLS or caller authentication.
+
+LSM-BPF capture and in-kernel deny require a kernel built with `CONFIG_BPF_LSM` and `bpf` present in the active LSM list. Enabling it requires appending `bpf` to the existing kernel command-line LSM list and rebooting; do not replace the existing list.
+
+### Phase 10 Packet Inspection Boundaries
+
+HTTP/DNS/TLS parsing is currently exposed through a payload-ingestion API. The code does not attach an AF_XDP socket, redirect live packets, or connect TCP reassembly to a live capture path. Treat the feature as an inspection component, not as an inline firewall or complete network sensor.
 
 4. **Out-of-Band Application Resilience**: Normal application traffic (`Client -> App -> Response`) never synchronously blocks on the control plane. In the event of a security controller outage, protected applications continue serving normal requests uninterrupted.
 
@@ -110,8 +124,9 @@ When deploying this control plane in production:
 1. **Network Isolation**: The control plane API should be accessible only from trusted application agents and the operations dashboard, not the public internet.
 2. **TLS Everywhere**: All telemetry ingestion and command channels should use TLS 1.3.
 3. **Principle of Least Privilege**: The control plane process should run with minimal OS privileges; it does not require root access.
-4. **Audit Logging**: Enable durable PostgreSQL audit logging for all containment actions and incident lifecycle transitions.
+4. **Audit Logging**: Use standalone SQLite persistence for events, incidents, and containment records where appropriate, and protect the database file with OS permissions and backups. PostgreSQL-backed durable logging is not currently available.
 5. **Key Management**: Ed25519 signing keys for containment commands should be stored in a hardware security module (HSM) or secure key vault in production deployments.
+6. **Native Enforcement**: Keep `NATIVE_ENFORCER` disabled unless needed. Review each action's privileges and impact; process termination cannot be rolled back.
 
 ---
 

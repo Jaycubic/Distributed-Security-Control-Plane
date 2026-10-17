@@ -3,12 +3,24 @@ name = "security-control-plane"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "corvus"
+path = "src/main.rs"
+
+[features]
+default = ["standalone"]
+standalone = ["dep:rusqlite"]
+distributed = ["security-control-plane-engine/distributed", "dep:sqlx"]
+
 [dependencies]
 security-control-plane-common = { path = "../common" }
 security-control-plane-engine = { path = "../engine" }
 security-control-plane-correlator = { path = "../correlator" }
 security-control-plane-sensors = { path = "../sensors" }
 security-control-plane-sensor-native = { path = "../sensor-native" }
+security-control-plane-port-guardian = { path = "../port-guardian" }
+security-control-plane-enforcer = { path = "../enforcer" }
+security-control-plane-packet-inspector = { path = "../packet-inspector" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -23,8 +35,9 @@ chrono = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
-redis = { workspace = true }
-sqlx = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 prometheus = { workspace = true }
 crossbeam-channel = { workspace = true }
 reqwest = { workspace = true }
+toml = { workspace = true }

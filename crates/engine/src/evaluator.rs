@@ -1,7 +1,8 @@
 use crate::incident::{Incident, IncidentStatus, SecuritySignal};
 use crate::rules::{
-    BruteForceRule, KernelAnomalyRule, MassDataScrapingRule, PrivilegeCreepRule,
-    RapidApiEnumerationRule, Rule, UnauthorizedBurstRule,
+    BruteForceRule, DnsTunnelingRule, HttpAnomalyRule, KernelAnomalyRule, MassDataScrapingRule,
+    PortScanRule, PrivilegeCreepRule, RapidApiEnumerationRule, Rule, TlsAnomalyRule,
+    UnauthorizedBurstRule,
 };
 use crate::state::{HotStateError, HotStateStore};
 use security_control_plane_common::SecurityEvent;
@@ -43,6 +44,10 @@ impl RuleEngine {
             Box::new(MassDataScrapingRule::default()),
             Box::new(KernelAnomalyRule),
             Box::new(PrivilegeCreepRule),
+            Box::new(PortScanRule),
+            Box::new(HttpAnomalyRule),
+            Box::new(DnsTunnelingRule),
+            Box::new(TlsAnomalyRule),
         ];
         Self::new(state, rules)
     }
@@ -116,12 +121,17 @@ impl RuleEngine {
         let mut history = self.incident_history.write().await;
 
         if let Some(existing) = active.get_mut(&target_entity) {
-            if existing.status == IncidentStatus::Open || existing.status == IncidentStatus::Investigating {
+            if existing.status == IncidentStatus::Open
+                || existing.status == IncidentStatus::Investigating
+            {
                 existing.add_signal(signal.clone(), Some(event.clone()));
                 let updated = existing.clone();
 
                 // Update in history as well
-                if let Some(item) = history.iter_mut().find(|i| i.incident_id == updated.incident_id) {
+                if let Some(item) = history
+                    .iter_mut()
+                    .find(|i| i.incident_id == updated.incident_id)
+                {
                     *item = updated.clone();
                 }
 

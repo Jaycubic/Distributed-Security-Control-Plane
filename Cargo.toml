@@ -8,7 +8,10 @@ members = [
     "crates/correlator",
     "crates/sensors",
     "crates/sensor-native-common",
-    "crates/sensor-native"
+    "crates/sensor-native",
+    "crates/port-guardian",
+    "crates/enforcer",
+    "crates/packet-inspector"
 ]
 
 [workspace.dependencies]
@@ -36,6 +39,9 @@ reqwest = { version = "0.12", features = ["json"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
 rand = "0.8"
 hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+httparse = "1.9"
 
 [profile.dev]
 incremental = false

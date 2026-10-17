@@ -27,6 +27,8 @@ This project is a high-performance, out-of-band security intelligence and rapid 
 
 All contributions **must** respect our core architectural invariants. Pull requests that violate any of these will be declined:
 
+Architecture v4 supplements v3 and takes precedence where they conflict. Before working on Phases 6–10, read [DSCP_Phase_Architecture_v4.md](DSCP_Phase_Architecture_v4.md), especially its known defects and dependency gates. The V3 Phase 6–8 code is a prototype baseline, not evidence that V4 requirements are met.
+
 1. **Hard Out-of-Band Invariant**:  
    Normal application requests must **never** wait for security ingestion, correlation, detection, or the security controller. Normal traffic is strictly `Client -> Application -> Response`. Telemetry is emitted asynchronously.
 
@@ -41,6 +43,9 @@ All contributions **must** respect our core architectural invariants. Pull reque
 
 5. **Deno-Style Capability Boundaries**:  
    Security context and permissions are inferred from event streams, not hard-coded. Contributions that touch identity or capability logic must preserve the dynamic, least-privilege model.
+6. **Stable Process Identity**: New process attribution uses `(pid, start_time)`. PID alone is not a safe process identity and must not be the basis for enforcement.
+7. **Audit Before Enforce**: New deny behavior starts in audit mode. Only an explicit operator action may promote a decision; automated or AI-driven promotion is forbidden.
+8. **Visible Degradation**: Missing kernel capabilities, event loss, TOCTOU-prone fallback capture, and io_uring visibility gaps must be reported as health limitations, not hidden.
 
 ---
 
@@ -172,22 +177,51 @@ cargo test -p security-control-plane-correlator
 cargo check -p security-control-plane
 cargo check -p security-control-plane-agent-sdk
 
-# 5. Verify application latency overhead benchmark
+# 5. Test Phase 6 native sensor normalization
+cargo test -p security-control-plane-sensor-native
+
+# 6. Test Phase 7 Port Guardian
+cargo test -p security-control-plane-port-guardian
+
+# 7. Test Phase 8 Native Enforcer
+cargo test -p security-control-plane-enforcer
+
+# 8. Test Phase 9 configuration and standalone persistence
+cargo test -p security-control-plane
+cargo build -p security-control-plane --bin corvus
+python tests/test_phase9_standalone.py
+
+# 9. Test Phase 10 packet inspection components
+cargo test -p security-control-plane-packet-inspector
+cargo test -p security-control-plane-engine
+
+# 10. Verify application latency overhead benchmark
 python benchmarks/measure_overhead.py
 
-# 6. Phase 1 integration test suite
+# 11. Phase 1 integration test suite
 python tests/test_phase1_slice.py
 
-# 7. Phase 2 end-to-end detection & containment suite
+# 12. Phase 2 end-to-end detection & containment suite
 python tests/test_phase2_engine.py
 
-# 8. Phase 3 cross-application correlation & identity suite
+# 13. Phase 3 cross-application correlation & identity suite
 python tests/test_phase3_correlation.py
 
-# 9. Typecheck & build the React dashboard
+# Phase 6/7/10 integration tests require a running control plane at localhost:8080
+python tests/test_phase6_native_sensor.py
+python tests/test_phase7_port_guardian.py
+python tests/test_phase10_packet_inspector.py
+
+# 14. Typecheck & build the React dashboard
 cd frontend
 npm run build
 ```
+
+The Phase 6 native sensor and Phase 8 system backend have Linux/kernel/privilege-specific behavior that portable Windows builds cannot exercise. Phase 10 tests cover parsing and API ingestion only; they do not validate AF_XDP capture, which is not implemented yet.
+
+### Architecture v4 kernel-phase gate
+
+Do not begin V4 Phase 6B until Phase 6A has been audited on a real Linux 5.15+ kernel and its hook attachment, sample events, and idle-CPU measurement are recorded. Do not begin Phase 8B until Phases 6B, 7B, and 8A meet their acceptance criteria. Windows CI can validate portable logic but cannot substitute for root-gated kernel lab tests. Keep those tests ignored in the ordinary unprivileged suite.
 
 ---
 
@@ -199,6 +233,9 @@ npm run build
 │   ├── engine/             # Deterministic rule engine, risk scoring, incident lifecycle
 │   ├── correlator/         # Identity resolution, context graph, cross-app sequence detection
 │   ├── control-plane/      # Axum HTTP/WS API, stream pipeline, selective persistence
+│   ├── port-guardian/      # Port bindings registry and scan/flood detection (Phase 7)
+│   ├── enforcer/           # Signed, opt-in Linux OS enforcement (Phase 8)
+│   ├── packet-inspector/   # Portable HTTP/DNS/TLS parsing and TCP reassembly (Phase 10)
 │   └── agent-sdk/          # Non-blocking Rust client library with fail-open queue
 ├── frontend/               # React + TypeScript + Vite operations dashboard
 ├── services/

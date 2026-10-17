@@ -22,6 +22,7 @@ pub enum SensorType {
     Network,
     System,
     NativeSensor,
+    PacketInspector,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

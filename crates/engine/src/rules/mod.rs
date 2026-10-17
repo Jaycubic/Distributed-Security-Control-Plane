@@ -70,9 +70,12 @@ impl Rule for BruteForceRule {
             .map(|a| {
                 !a.is_success
                     && (a.status_code == Some(401)
-                        || a.endpoint
-                            .as_deref()
-                            .map_or(false, |ep| ep.contains("login") || ep.contains("auth") || ep.contains("token") || ep.contains("session")))
+                        || a.endpoint.as_deref().map_or(false, |ep| {
+                            ep.contains("login")
+                                || ep.contains("auth")
+                                || ep.contains("token")
+                                || ep.contains("session")
+                        }))
             })
             .unwrap_or(false);
 
@@ -407,7 +410,10 @@ impl Rule for KernelAnomalyRule {
     ) -> Result<Option<SecuritySignal>, HotStateError> {
         let is_kernel_sensor = matches!(
             event.source.sensor.sensor_type,
-            SensorType::Tetragon | SensorType::Falco | SensorType::System | SensorType::NativeSensor
+            SensorType::Tetragon
+                | SensorType::Falco
+                | SensorType::System
+                | SensorType::NativeSensor
         ) || event.event_type.contains("process_exec")
             || event.event_type.contains("falco")
             || event.event_type.contains("tetragon")
@@ -436,9 +442,7 @@ impl Rule for KernelAnomalyRule {
         let raw_type = &event.source.sensor.raw_event_type;
 
         let matches_binary = suspicious_binaries.iter().any(|&b| {
-            proc_name.ends_with(b)
-                || endpoint_or_cmd.contains(b)
-                || raw_type.contains(b)
+            proc_name.ends_with(b) || endpoint_or_cmd.contains(b) || raw_type.contains(b)
         });
 
         if is_kernel_sensor && (matches_binary || event.severity == Severity::Critical) {
@@ -541,5 +545,177 @@ impl Rule for PrivilegeCreepRule {
         } else {
             Ok(None)
         }
+    }
+}
+
+pub struct PortScanRule;
+
+#[async_trait]
+impl Rule for PortScanRule {
+    fn id(&self) -> &'static str {
+        "RULE_PORT_SCAN"
+    }
+
+    fn name(&self) -> &'static str {
+        "Port Scan / Connection Flood Detected"
+    }
+
+    fn description(&self) -> &'static str {
+        "Detects rapid probes against ports currently registered as server bindings."
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+
+    fn base_risk_weight(&self) -> u32 {
+        40
+    }
+
+    async fn evaluate(
+        &self,
+        event: &SecurityEvent,
+        _state: &dyn HotStateStore,
+    ) -> Result<Option<SecuritySignal>, HotStateError> {
+        let Some(description) = event
+            .metadata
+            .get("port_scan_signal")
+            .and_then(|value| value.as_str())
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(SecuritySignal {
+            signal_id: Uuid::new_v4(),
+            rule_name: self.name().to_string(),
+            severity: if event.severity == Severity::Critical {
+                Severity::Critical
+            } else {
+                self.default_severity()
+            },
+            description: description.to_string(),
+            risk_weight: self.base_risk_weight(),
+            timestamp: Utc::now(),
+            matched_event_ids: vec![event.event_id],
+        }))
+    }
+}
+
+pub struct HttpAnomalyRule;
+pub struct DnsTunnelingRule;
+pub struct TlsAnomalyRule;
+
+macro_rules! packet_anomaly_rule {
+    ($rule:ident, $id:literal, $name:literal, $metadata_key:literal, $description:literal) => {
+        #[async_trait]
+        impl Rule for $rule {
+            fn id(&self) -> &'static str {
+                $id
+            }
+
+            fn name(&self) -> &'static str {
+                $name
+            }
+
+            fn description(&self) -> &'static str {
+                $description
+            }
+
+            fn default_severity(&self) -> Severity {
+                Severity::High
+            }
+
+            fn base_risk_weight(&self) -> u32 {
+                40
+            }
+
+            async fn evaluate(
+                &self,
+                event: &SecurityEvent,
+                _state: &dyn HotStateStore,
+            ) -> Result<Option<SecuritySignal>, HotStateError> {
+                if event
+                    .metadata
+                    .get($metadata_key)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    Ok(Some(SecuritySignal {
+                        signal_id: Uuid::new_v4(),
+                        rule_name: self.name().to_string(),
+                        severity: self.default_severity(),
+                        description: format!("{} ({})", $description, event.event_type),
+                        risk_weight: self.base_risk_weight(),
+                        timestamp: Utc::now(),
+                        matched_event_ids: vec![event.event_id],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    };
+}
+
+packet_anomaly_rule!(
+    HttpAnomalyRule,
+    "RULE_HTTP_ANOMALY",
+    "HTTP Request Anomaly",
+    "http_anomaly",
+    "HTTP request contains path traversal, a suspicious scanner user-agent, or oversized headers"
+);
+packet_anomaly_rule!(
+    DnsTunnelingRule,
+    "RULE_DNS_TUNNELING",
+    "DNS Tunneling",
+    "dns_tunneling",
+    "DNS query contains an unusually long label consistent with tunneling"
+);
+packet_anomaly_rule!(
+    TlsAnomalyRule,
+    "RULE_TLS_ANOMALY",
+    "TLS ClientHello Anomaly",
+    "tls_anomaly",
+    "TLS ClientHello uses a weak protocol version or cipher suite"
+);
+
+#[cfg(test)]
+mod packet_rule_tests {
+    use super::*;
+    use crate::state::MemoryHotState;
+    use security_control_plane_common::{SensorMetadata, SensorType, SourceContext};
+
+    #[tokio::test]
+    async fn dns_tunneling_rule_generates_signal_for_inspector_event() {
+        let mut event = SecurityEvent::new(
+            "test-host",
+            "test",
+            "net.dns.query",
+            SourceContext {
+                ip: Some("192.0.2.1".into()),
+                port: Some(53000),
+                user_agent: None,
+                sensor: SensorMetadata {
+                    sensor_type: SensorType::PacketInspector,
+                    raw_event_type: "net.dns.query".into(),
+                    sensor_id: None,
+                    raw_payload: None,
+                },
+                container_id: None,
+                pid: None,
+                process_name: None,
+            },
+        );
+        event
+            .metadata
+            .insert("dns_tunneling".into(), serde_json::Value::Bool(true));
+
+        let signal = DnsTunnelingRule
+            .evaluate(&event, &MemoryHotState::new())
+            .await
+            .expect("rule evaluation")
+            .expect("DNS tunneling signal");
+        assert_eq!(signal.rule_name, "DNS Tunneling");
+        assert_eq!(signal.severity, Severity::High);
     }
 }

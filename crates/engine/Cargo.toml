@@ -13,5 +13,9 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-redis = { workspace = true }
+redis = { workspace = true, optional = true }
 futures = { workspace = true }
+
+[features]
+default = []
+distributed = ["dep:redis"]

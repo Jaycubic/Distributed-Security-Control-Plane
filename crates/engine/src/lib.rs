@@ -12,18 +12,21 @@ pub use evaluator::RuleEngine;
 pub use incident::{Incident, IncidentStatus, SecuritySignal};
 pub use policy::CapabilityPolicyEngine;
 pub use rules::{
-    BruteForceRule, KernelAnomalyRule, MassDataScrapingRule, PrivilegeCreepRule,
-    RapidApiEnumerationRule, Rule, UnauthorizedBurstRule,
+    BruteForceRule, DnsTunnelingRule, HttpAnomalyRule, KernelAnomalyRule, MassDataScrapingRule,
+    PortScanRule, PrivilegeCreepRule, RapidApiEnumerationRule, Rule, TlsAnomalyRule,
+    UnauthorizedBurstRule,
 };
-pub use state::{HotStateError, HotStateStore, MemoryHotState, RedisHotState};
+#[cfg(feature = "distributed")]
+pub use state::RedisHotState;
+pub use state::{HotStateError, HotStateStore, MemoryHotState};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
     use security_control_plane_common::{
-        ActionContext, ActorContext, SecurityEvent, SensorMetadata, SensorType, SourceContext,
-        Severity,
+        ActionContext, ActorContext, SecurityEvent, SensorMetadata, SensorType, Severity,
+        SourceContext,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -36,7 +39,11 @@ mod tests {
             app_id: "test-app".into(),
             environment: "test".into(),
             event_type: "auth.login".into(),
-            severity: if is_success { Severity::Low } else { Severity::Medium },
+            severity: if is_success {
+                Severity::Low
+            } else {
+                Severity::Medium
+            },
             actor: Some(ActorContext {
                 user_id: Some("attacker".into()),
                 role: None,
@@ -112,7 +119,10 @@ mod tests {
         let ev10 = mock_login_event("192.168.1.100", false);
         let signals = engine.evaluate_event(&ev10).await.unwrap();
         assert_eq!(signals.len(), 1);
-        assert_eq!(signals[0].rule_name, "Credential Brute-Force / Password Spray");
+        assert_eq!(
+            signals[0].rule_name,
+            "Credential Brute-Force / Password Spray"
+        );
 
         // Verify incident creation
         let incidents = engine.get_active_incidents().await;
@@ -165,7 +175,10 @@ mod tests {
         let signals = engine.evaluate_event(&kernel_ev).await.unwrap();
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].severity, Severity::Critical);
-        assert_eq!(signals[0].rule_name, "Suspicious Container / Kernel Execution");
+        assert_eq!(
+            signals[0].rule_name,
+            "Suspicious Container / Kernel Execution"
+        );
 
         let incidents = engine.get_active_incidents().await;
         assert_eq!(incidents.len(), 1);

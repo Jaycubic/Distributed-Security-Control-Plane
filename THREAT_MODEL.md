@@ -15,10 +15,11 @@ A compromised application can forge, replay, or suppress its own security teleme
 ### Current State
 The control plane currently **trusts all emitters**. There is no authentication, signing, or integrity verification on inbound telemetry from application middleware.
 
-### Mitigations (Planned & Implemented)
-- **Native Kernel eBPF Sensor (Phase 6)**: The in-tree eBPF sensor hooks directly into kernel tracepoints (`sys_enter_execve`) and kprobes (`sys_connect`, `sys_bind`, `sys_accept4`). Unprivileged applications cannot forge or suppress kernel-level syscall events. Even if an attacker compromises application middleware, the kernel probe emits ground-truth telemetry.
+### Mitigations (Implemented & Remaining)
+- **Native Kernel eBPF Sensor (V3 prototype)**: The current sensor uses syscall tracepoints and kprobes and reads user-space exec filenames and connect/bind sockaddr pointers. This is not authoritative telemetry: TOCTOU races can make the observation differ from the data ultimately consumed by the kernel. The kprobe names are architecture-dependent, accept events lack peer addresses, and process attribution is PID-only with userspace `/proc` reads.
+- **V4 direction, not yet implemented**: Phase 6A audits the existing hooks and consumer; Phase 6B moves primary capture to LSM hooks where arguments are in kernel memory, with stable process identity. The tracepoint path remains explicitly degraded. LSM-BPF requires `CONFIG_BPF_LSM` and `bpf` in the active LSM list.
 - **External sensor adapters** (Tetragon, Falco, Hubble) provide Kubernetes container runtime visibility outside the application container.
-- **Anomaly detection on telemetry volume**: A sudden drop in event rate from an application that was previously active is itself a detection signal.
+- **Remaining risk**: Inbound telemetry is not authenticated or signed by the control plane. A compromised or spoofed emitter can still forge or replay events; deployment-level authentication and network isolation are required. Syscall monitoring also misses activity performed exclusively through io_uring; V4 plans to report this blind spot rather than claim complete coverage.
 
 ---
 
@@ -30,10 +31,11 @@ The local enforcement agent is itself a target. An attacker who compromises the 
 - **Exfiltrate signing keys**: Steal the Ed25519 private key and forge containment commands.
 - **Replay old commands**: Re-execute expired containment actions.
 
-### Current State & Architecture v3 Evolution
-- Ed25519 signing is implemented with **mandatory TTLs** and **nonce-based replay protection**.
-- The signing key is held strictly by the control plane; agents verify signatures using public keys only.
-- **Native Enforcer (Phase 8)**: To eliminate reliance on in-process application agents, Phase 8 introduces OS-level containment (`nftables` DROP rules, XDP packet drops, SIGKILL). The control plane executes containment out-of-band at the kernel/firewall layer, meaning even a completely hijacked application process cannot refuse or bypass containment.
+### Current State & Architecture v4 Evolution
+- Ed25519-signed containment commands include **mandatory TTLs** and replay identifiers.
+- **Native Enforcer (V3 Phase 8)** is opt-in (`NATIVE_ENFORCER=true`) and executes userspace actions after the detection event. It is post-hoc and cannot prevent the original exec/connect syscall.
+- The current backend uses `kill -9` by PID and modifies a shared nftables structure; PID reuse can target the wrong process and broad rollback can disturb unrelated firewall state. Process termination is irreversible. Keep the enforcer disabled in production until V4 phases 8A–8C's decisions, bouncers, pidfd, expiry, reconciliation, and lockout-prevention requirements are met.
+- **Synchronous LSM deny (V4 Phase 8B)** is not implemented. V4 requires audit mode first, explicit operator promotion, protected process/cgroup exclusions, expiry cleanup, fail-open behavior, and automatic detach when the agent exits.
 
 ---
 
@@ -58,8 +60,8 @@ The identity resolution layer merges heterogeneous identifiers (IP addresses, se
 - **Operational overhead**: Requiring external distributed databases (PostgreSQL, Redis) for small or single-server deployments introduces operational points of failure.
 
 ### Architecture v3 Resolution
-- **Standalone Mode (`corvus`, Phase 9)**: Implements single-binary zero-dependency deployment using an embedded SQLite durable sink and `MemoryHotState`. This provides persistent storage for events, incidents, and containment audit logs without external operational dependencies.
-- **Distributed Mode**: In high-throughput deployments, Redis (hot sliding windows) and PostgreSQL (partitioned durable event store) can be enabled via feature flags.
+- **Standalone Mode (`corvus`, Phase 9)**: Uses an embedded SQLite durable sink and `MemoryHotState` for events, incidents, and containment records, without external database services.
+- **Distributed Mode**: The `distributed` feature supports Redis hot state. Durable PostgreSQL storage is not implemented; the distributed durable sink is currently in-memory.
 
 ---
 
@@ -79,11 +81,25 @@ The identity resolution layer merges heterogeneous identifiers (IP addresses, se
 
 ### Native eBPF Sensor (Phase 6)
 - **Kernel Verifier Safety**: All in-tree eBPF programs are verified at load time by the Linux kernel verifier, guaranteeing termination, memory safety, and no panics.
-- **Ring Buffer Drops**: The 256 KB eBPF ring buffer prioritizes kernel stability over guaranteed event delivery. Under extreme syscall pressure, if the ring buffer fills, events are safely dropped rather than blocking the kernel syscall execution path.
+- **Ring Buffer Drops**: The 256 KB eBPF ring buffer prioritizes kernel stability over guaranteed event delivery. Under pressure, reserve failures drop events; the current sensor does not count these losses or surface them as health events. The current userspace consumer polls with a 1 ms sleep when empty.
 - **Privilege Requirements**: Loading requires root or `CAP_BPF + CAP_PERFMON` on Linux 5.15+ LTS with BTF (`/sys/kernel/btf/vmlinux`). Non-privileged environments gracefully fall back without crashing.
 
-### Port Guardian (Phase 7)
-- Processes binding to ephemeral ports could churn the port registry. Handled via sliding-window TTL eviction.
+### Port Guardian (V3 Phase 7)
+- The current detector relies on local bind/connect/accept events and registered ports. Outbound `connect` is not inbound scan telemetry, and a SYN scan against closed ports will not complete an `accept`; the current phase cannot detect that common scan type.
+- Bind events miss services already listening when the sensor starts. There is no candidate/approve/protect service lifecycle, and filename-only severity is easy to evade through renaming.
+- V4 phases 7A–7C replace this with host enrollment, service discovery/reconciliation and approval, and aggregated ingress SYN observation. Until then, scan detections are limited and should not be treated as comprehensive.
+
+### Packet Inspection (Phase 10, partial)
+- Portable HTTP, DNS, and TLS payload parsing and an ingestion endpoint are implemented. The bounded TCP reassembly component is not connected to a live packet stream.
+- There is no AF_XDP socket, XDP redirect, or live network capture path. Submitted payloads remain untrusted input and must be bounded and validated at the ingestion boundary.
+
+### Host and service onboarding (V4 planned)
+- V3 has no pending-then-approved host enrollment or authenticated sensor-post protocol. It also has no service proposal/approval workflow. Until implemented, deployments must not treat an observed host/listener as approved or authenticated.
+
+### Residual kernel risks (V4)
+- A privileged/root attacker can detach or blind eBPF programs. BPF/module-load monitoring can improve observability but cannot guarantee sensor integrity.
+- If LSM-BPF is unavailable, syscall tracepoints remain TOCTOU-vulnerable and must be explicitly labeled degraded.
+- io_uring can bypass syscall-level observation. Health reporting and `corvus doctor` are planned coverage signals, not mitigations that eliminate the blind spot.
 
 ### External Sensor Adapters (Tetragon, Falco, Hubble)
 - Rest-based adapters validate incoming JSON against strict schemas; corrupted or malformed external sensor payloads are rejected at the ingestion boundary.
@@ -97,6 +113,7 @@ This threat model covers the security control plane itself. It does **not** cove
 - Infrastructure-level attacks (compromised Kubernetes control plane, hypervisor escapes).
 - Physical access to the machines running the control plane.
 - Supply chain attacks on the Rust toolchain or npm dependencies (though `cargo audit` and `npm audit` are recommended).
+- Network-level authentication/TLS and operator access control; these must be provided by a trusted deployment boundary.
 
 ---
 

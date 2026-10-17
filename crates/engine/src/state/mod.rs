@@ -1,10 +1,12 @@
 use async_trait::async_trait;
+#[cfg(feature = "distributed")]
 use redis::AsyncCommands;
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HotStateError {
+    #[cfg(feature = "distributed")]
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
     #[error("Lock contention or poisoned lock")]
@@ -188,9 +190,7 @@ impl HotStateStore for MemoryHotState {
             .entity_risks
             .write()
             .map_err(|_| HotStateError::LockPoisoned)?;
-        let entry = map
-            .entry(entity_id.to_string())
-            .or_insert((0, expiry_ms));
+        let entry = map.entry(entity_id.to_string()).or_insert((0, expiry_ms));
 
         if entry.1 <= now_ms {
             entry.0 = points;
@@ -216,10 +216,12 @@ impl HotStateStore for MemoryHotState {
 }
 
 /// Redis-backed Hot State implementation for multi-node distributed deployments.
+#[cfg(feature = "distributed")]
 pub struct RedisHotState {
     client: redis::Client,
 }
 
+#[cfg(feature = "distributed")]
 impl RedisHotState {
     pub fn new(redis_url: &str) -> Result<Self, HotStateError> {
         let client = redis::Client::open(redis_url)?;
@@ -227,6 +229,7 @@ impl RedisHotState {
     }
 }
 
+#[cfg(feature = "distributed")]
 #[async_trait]
 impl HotStateStore for RedisHotState {
     async fn record_hit(

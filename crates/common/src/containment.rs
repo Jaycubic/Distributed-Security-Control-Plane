@@ -13,6 +13,10 @@ pub enum ContainmentActionType {
     RevokeCapability,
     RestrictScope,
     IsolateService,
+    XdpDropAddress,
+    NftablesBlock,
+    KillProcess,
+    KillConnection,
 }
 
 impl ContainmentActionType {
@@ -24,6 +28,10 @@ impl ContainmentActionType {
             Self::RevokeCapability => "REVOKE_CAPABILITY",
             Self::RestrictScope => "RESTRICT_SCOPE",
             Self::IsolateService => "ISOLATE_SERVICE",
+            Self::XdpDropAddress => "XDP_DROP_ADDRESS",
+            Self::NftablesBlock => "NFTABLES_BLOCK",
+            Self::KillProcess => "KILL_PROCESS",
+            Self::KillConnection => "KILL_CONNECTION",
         }
     }
 
@@ -35,6 +43,10 @@ impl ContainmentActionType {
             "REVOKE_CAPABILITY" => Self::RevokeCapability,
             "RESTRICT_SCOPE" => Self::RestrictScope,
             "ISOLATE_SERVICE" => Self::IsolateService,
+            "XDP_DROP_ADDRESS" => Self::XdpDropAddress,
+            "NFTABLES_BLOCK" => Self::NftablesBlock,
+            "KILL_PROCESS" => Self::KillProcess,
+            "KILL_CONNECTION" => Self::KillConnection,
             _ => Self::ThrottleActor,
         }
     }

@@ -1,0 +1,10 @@
+# Corvus standalone mode: embedded SQLite and in-memory hot state.
+mode = "standalone"
+bind_address = "0.0.0.0:8080"
+log_level = "info"
+
+[storage]
+sqlite_path = "./corvus.db"
+
+[sensor]
+native_enabled = false

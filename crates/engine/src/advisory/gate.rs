@@ -82,8 +82,14 @@ impl AdvisoryPolicyGate {
                 security_control_plane_common::ContainmentActionType::ThrottleActor => {
                     "network.throttle".to_string()
                 }
-                security_control_plane_common::ContainmentActionType::BlockNetwork => {
+                security_control_plane_common::ContainmentActionType::BlockNetwork
+                | security_control_plane_common::ContainmentActionType::XdpDropAddress
+                | security_control_plane_common::ContainmentActionType::NftablesBlock
+                | security_control_plane_common::ContainmentActionType::KillConnection => {
                     "network.connect".to_string()
+                }
+                security_control_plane_common::ContainmentActionType::KillProcess => {
+                    "process.terminate".to_string()
                 }
                 security_control_plane_common::ContainmentActionType::RevokeCapability => {
                     "capability.revoke".to_string()
