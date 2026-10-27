@@ -15,6 +15,7 @@ All notable project changes are documented here.
 - Operations dashboard and real-time event/incident streaming.
 - Cross-application attack-chain simulation.
 - Architecture documentation and software citation metadata.
+- Canonical telemetry event examples (application, runtime, network) with the field reference.
 
 ### Security Architecture
 - Maintains the out-of-band application/request-path invariant.
