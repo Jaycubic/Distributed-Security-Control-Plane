@@ -267,6 +267,7 @@ python benchmarks/measure_overhead.py
 - [Threat Model & Known Limitations](THREAT_MODEL.md)
 - [Use Cases](docs/USE-CASES.md)
 - [Detection & Correlation](docs/DETECTION-AND-CORRELATION.md)
+- [Sliding-Window Detection Rules](docs/DETECTION-RULES.md)
 - [Changelog](CHANGELOG.md)
 
 ---
