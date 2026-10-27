@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Documented Hubble telemetry examples: representative `DROPPED` and `ALLOWED` flow fixtures under `crates/sensors/fixtures/hubble/`, a service/endpoint/protocol/flow-context mapping page (`docs/HUBBLE-EXAMPLES.md`), and fixture-backed schema-preservation tests (`#16`).
+
 All notable project changes are documented here.
 
 ## [0.3.0] — Identity, Correlation & Security Context
