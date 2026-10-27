@@ -17,6 +17,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+temp_auto_push.bat
 venv/
 env/
 .pytest_cache/
@@ -28,7 +29,6 @@ rust_security_target/
 .cargo/config.toml
 
 # IDE & OS
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -38,3 +38,5 @@ Thumbs.db
 # Logs & temporary files
 *.log
 scratch/
+.gitignore
+branch_structure.json

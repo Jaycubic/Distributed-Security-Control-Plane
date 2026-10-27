@@ -364,4 +364,53 @@ mod tests {
         assert_eq!(event.event_type, "kernel.kprobe.sys_enter_connect");
         assert_eq!(event.source.pid, Some(5012));
     }
+
+    /// Fixture-backed schema-preservation check: load the representative
+    /// `process_exec` sample from `fixtures/tetragon/` and assert that the raw
+    /// Tetragon fields survive the adapter as the canonical, typed fields the
+    /// control plane reads (invariant #3 — preserve sensor semantics).
+    #[test]
+    fn schema_preserved_for_fixture_process_exec() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/tetragon/process_exec.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let event = TetragonAdapter::parse_event(&raw).expect("parse fixture");
+
+        // Identity + provenance carried through from the raw event.
+        assert_eq!(event.app_id, "billing-deployment");
+        assert_eq!(event.source.sensor.sensor_type, SensorType::Tetragon);
+        assert_eq!(event.source.sensor.raw_event_type, "process_exec");
+        assert_eq!(event.source.sensor.sensor_id.as_deref(), Some("worker-k8s-01"));
+        assert_eq!(event.source.container_id.as_deref(), Some("containerd://a83f9104c99e"));
+        assert_eq!(event.source.pid, Some(4821));
+        assert_eq!(event.source.process_name.as_deref(), Some("/bin/sh"));
+
+        // The raw payload is retained for forensics, keyed by its own field.
+        let payload = event.source.sensor.raw_payload.as_ref().unwrap();
+        assert_eq!(
+            payload.get("process_exec").unwrap()["process"]["binary"],
+            "/bin/sh"
+        );
+
+        // A shell inside a container is the critical, significant case.
+        assert_eq!(event.severity, Severity::Critical);
+        assert!(event.is_security_significant);
+    }
+
+    /// Same for the `process_kprobe` family: the kprobe function name becomes
+    /// the event type suffix and the kprobe stays significant.
+    #[test]
+    fn schema_preserved_for_fixture_process_kprobe() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/tetragon/process_kprobe.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        let event = TetragonAdapter::parse_event(&raw).expect("parse fixture");
+        assert_eq!(event.event_type, "kernel.kprobe.sys_enter_connect");
+        assert_eq!(event.source.sensor.sensor_type, SensorType::Tetragon);
+        assert_eq!(event.source.sensor.raw_event_type, "process_kprobe");
+        assert_eq!(event.source.pid, Some(5012));
+        assert!(event.is_security_significant);
+    }
 }
