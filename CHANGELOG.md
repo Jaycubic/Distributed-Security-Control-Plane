@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Documented the canonical `SecurityEvent` schema (`docs/CANONICAL-EVENT-SCHEMA.md`): required vs. optional wire fields, the enum serialization conventions, the "absence is meaningful" optional-field contract, and the `validate_security_event` limits kept in lockstep with the implementation (`#20`).
+
 All notable project changes are documented here.
 
 ## [0.3.0] — Identity, Correlation & Security Context
